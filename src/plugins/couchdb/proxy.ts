@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyError } from 'fastify'
-import proxy from 'fastify-http-proxy'
+import proxy from '@fastify/http-proxy'
 
 interface Options {
   url: string
@@ -13,6 +13,7 @@ function couchDBProxy(
   fastify.register(proxy, {
     upstream: options.url,
     prefix: '/_db',
+    rewritePrefix: '/_db',
   })
   next()
 }

@@ -122,18 +122,21 @@ export default (
       // Simulate delivery for each method
       const deliveries = deliveryReq.methods.map((method) => {
         // In a real implementation, this would actually send emails, print, etc.
-        const delivery = {
+        let delivery: any = {
           method,
           deliveredAt: now,
           deliveredTo: deliveryReq.emailAddress || deliveryReq.recipientName || 'N/A',
-          status: 'success' as const,
+          status: 'success',
           error: undefined,
         }
 
         // Add specific logic for each method if needed
         if (method === 'email' && !deliveryReq.emailAddress) {
-          delivery.status = 'failed'
-          delivery.error = 'Email address not provided'
+          delivery = {
+            ...delivery,
+            status: 'failed',
+            error: 'Email address not provided',
+          }
         }
         // For 'print', 'portal', 'api', 'hl7' we assume success for now
 
@@ -142,7 +145,7 @@ export default (
       })
 
       report.deliveryMethods = deliveryReq.methods
-      report.deliveryStatus = deliveries.some((d) => d.status === 'failed') ? 'failed' : 'delivered'
+      report.deliveryStatus = deliveries.some((d: any) => d.status === 'failed') ? 'failed' : 'delivered'
       report.deliveryHistory = deliveryHistory
       report.updatedAt = now
 

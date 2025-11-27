@@ -81,7 +81,7 @@ export default (
 
       if (isCritical) {
         const now = new Date().toISOString()
-        const criticalValue = {
+        const criticalValue: any = {
           type: 'critical_value',
           resultId,
           patientId: result.patientId,

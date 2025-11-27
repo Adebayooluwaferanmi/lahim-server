@@ -2,17 +2,15 @@ import { join } from 'path'
 import AutoLoad from 'fastify-autoload'
 import { FastifyInstance } from 'fastify'
 import { nextCallback } from 'fastify-plugin'
-import noIcon from 'fastify-no-icon'
-import helmet from 'fastify-helmet'
+import helmet from '@fastify/helmet'
 import qs from 'qs'
-import cors from 'fastify-cors'
+import cors from '@fastify/cors'
 
 function HospitalRun(fastify: FastifyInstance, opts: any, next: nextCallback) {
   fastify.register(cors, {
     allowedHeaders: ['Content-Type', 'Authorization'],
   })
   fastify.register(helmet)
-  fastify.register(noIcon)
 
   // This loads all application wide plugins defined in plugins folder
   fastify.register(AutoLoad, {

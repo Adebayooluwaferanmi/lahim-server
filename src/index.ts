@@ -15,7 +15,7 @@ if (process.env.NODE_ENV !== 'production') {
   fastify.register(blipp)
 }
 
-fastify.listen(port, ip, err => {
+fastify.listen({ port, host: ip }, (err) => {
   if (err) {
     fastify.log.error(err)
     process.exit(1)

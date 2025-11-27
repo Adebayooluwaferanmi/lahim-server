@@ -96,7 +96,7 @@ export default (
       })
 
       const now = new Date().toISOString()
-      const newWorklist = {
+      const newWorklist: any = {
         type: 'worklist',
         date: targetDate,
         mode: mode || 'auto',

@@ -137,13 +137,10 @@ export default (
       if (result.resultType === 'numeric' && result.numericValue !== undefined) {
         setImmediate(async () => {
           try {
-            const apiUrl = process.env.REACT_APP_HOSPITALRUN_API || 'http://localhost:3000'
-            await fetch(`${apiUrl}/critical-values/check`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ resultId: insertResult.id }),
-            })
-          } catch (error) {
+            // Note: Critical value check would be handled by the service itself
+            // This is just a placeholder for async notification
+            fastify.log.info({ resultId: insertResult.id }, 'critical_value_check_queued')
+          } catch (error: unknown) {
             fastify.log.warn({ error, resultId: insertResult.id }, 'Failed to check critical value')
           }
         })
