@@ -93,7 +93,6 @@
     "eslint-plugin-import": "~2.20.0",
     "eslint-plugin-prettier": "~3.1.0",
     "glob": "~7.1.6",
-    "husky": "~4.2.0",
     "lint-staged": "~10.2.0",
     "mkdirp": "~1.0.3",
     "nodemon": "~2.0.0",
@@ -112,12 +111,6 @@
   "config": {
     "commitizen": {
       "path": "./node_modules/cz-conventional-changelog"
-    }
-  },
-  "husky": {
-    "hooks": {
-      "commit-msg": "npm run commitlint -- -E HUSKY_GIT_PARAMS",
-      "pre-commit": "npm run lint-staged"
     }
   },
   "lint-staged": {
