@@ -1,17 +1,39 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { nextCallback } from 'fastify-plugin'
+import { FastifyError } from 'fastify'
+import { createCouchDBIndexes } from '../lib/db-utils'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: nextCallback,
+  next: (err?: FastifyError) => void,
 ) => {
-  const db = fastify.couch.db.use('critical_values')
-  const labResultsDb = fastify.couch.db.use('lab_results')
+  const db = fastify.couchAvailable && fastify.couch 
+    ? fastify.couch.db.use('critical_values')
+    : null
+  const labResultsDb = fastify.couchAvailable && fastify.couch
+    ? fastify.couch.db.use('lab_results')
+    : null
+
+  // Create indexes on service load
+  createCouchDBIndexes(
+    fastify,
+    'critical_values',
+    [
+      { index: { fields: ['type'] }, name: 'type-index' },
+      { index: { fields: ['type', 'detectedOn'] }, name: 'type-detectedOn-index' },
+      { index: { fields: ['type', 'status'] }, name: 'type-status-index' },
+      { index: { fields: ['type', 'patientId'] }, name: 'type-patientId-index' },
+    ],
+    'Critical values'
+  )
 
   // GET /critical-values - List critical values
   fastify.get('/critical-values', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { limit = 50, skip = 0, status, patientId } = request.query as any
       const selector: any = { type: 'critical_value' }
@@ -23,7 +45,7 @@ export default (
         selector,
         limit: parseInt(limit, 10),
         skip: parseInt(skip, 10),
-        sort: [{ detectedOn: 'desc' }],
+        sort: [{ detectedOn: 'desc' }], // Sort by detectedOn desc only (CouchDB doesn't support mixed directions)
       })
 
       fastify.log.info({ count: result.docs.length }, 'critical_values.list')
@@ -36,6 +58,10 @@ export default (
 
   // GET /critical-values/:id - Get single critical value
   fastify.get('/critical-values/:id', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const doc = await db.get(id)
@@ -59,6 +85,10 @@ export default (
 
   // POST /critical-values/check - Check if a result is critical
   fastify.post('/critical-values/check', async (request, reply) => {
+    if (!db || !labResultsDb) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { resultId } = request.body as { resultId: string }
 
@@ -115,6 +145,10 @@ export default (
 
   // PUT /critical-values/:id/acknowledge - Acknowledge critical value
   fastify.put('/critical-values/:id/acknowledge', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const { acknowledgedBy, notes } = request.body as any

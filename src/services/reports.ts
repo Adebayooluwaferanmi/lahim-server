@@ -1,6 +1,7 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { nextCallback } from 'fastify-plugin'
+import { FastifyError } from 'fastify'
+import { createCouchDBIndexes } from '../lib/db-utils'
 
 interface DeliveryRequest {
   methods: ('email' | 'portal' | 'print' | 'api' | 'hl7')[]
@@ -21,12 +22,31 @@ interface Report {
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: nextCallback,
+  next: (err?: FastifyError) => void,
 ) => {
-  const db = fastify.couch.db.use('reports')
+  const db = fastify.couchAvailable && fastify.couch 
+    ? fastify.couch.db.use('reports')
+    : null
+
+  // Create indexes on service load
+  createCouchDBIndexes(
+    fastify,
+    'reports',
+    [
+      { index: { fields: ['type'] }, name: 'type-index' },
+      { index: { fields: ['type', 'generatedOn'] }, name: 'type-generatedOn-index' },
+      { index: { fields: ['type', 'patientId'] }, name: 'type-patientId-index' },
+      { index: { fields: ['type', 'status'] }, name: 'type-status-index' },
+    ],
+    'Reports'
+  )
 
   // GET /reports - List reports
   fastify.get('/reports', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { limit = 50, skip = 0, patientId, status } = request.query as any
       const selector: any = { type: 'report' }
@@ -38,7 +58,7 @@ export default (
         selector,
         limit: parseInt(limit, 10),
         skip: parseInt(skip, 10),
-        sort: [{ generatedOn: 'desc' }],
+        sort: [{ generatedOn: 'desc' }], // Sort by generatedOn desc only (CouchDB doesn't support mixed directions)
       })
 
       fastify.log.info({ count: result.docs.length }, 'reports.list')
@@ -51,6 +71,10 @@ export default (
 
   // GET /reports/:id - Get single report
   fastify.get('/reports/:id', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const doc = await db.get(id)
@@ -74,6 +98,10 @@ export default (
 
   // POST /reports - Generate report
   fastify.post('/reports', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const reportRequest = request.body as any
 
@@ -104,6 +132,10 @@ export default (
 
   // POST /reports/:id/deliver - Deliver report via multiple channels
   fastify.post('/reports/:id/deliver', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const deliveryReq = request.body as DeliveryRequest

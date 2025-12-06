@@ -1,0 +1,215 @@
+// Prisma schema for LaHIM PostgreSQL database
+// This is the primary database for complex queries and analytics
+// CouchDB remains for offline sync
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Lab Orders - Pre-analytical stage
+model LabOrder {
+  id            String   @id @default(uuid())
+  patientId     String
+  testCodeLoinc String
+  status        String   // requested, approved, collected, received, in-progress, completed
+  priority      String?  // stat, urgent, routine, scheduled
+  orderedAt     DateTime @default(now())
+  collectedAt   DateTime?
+  receivedAt    DateTime?
+  finalizedAt   DateTime?
+  facilityId    String?
+  practitionerId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  specimens     LabSpecimen[]
+  results       LabResult[]
+
+  @@index([patientId])
+  @@index([status])
+  @@index([orderedAt])
+  @@index([testCodeLoinc])
+}
+
+// Lab Specimens - Pre-analytical stage
+model LabSpecimen {
+  id              String   @id @default(uuid())
+  orderId         String
+  specimenTypeCode String
+  collectedAt     DateTime
+  container       String?
+  accessionNo     String   @unique
+  storageLocation String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  order           LabOrder  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  results         LabResult[]
+
+  @@index([orderId])
+  @@index([accessionNo])
+  @@index([collectedAt])
+}
+
+// Lab Results - Analytical stage
+model LabResult {
+  id              String   @id @default(uuid())
+  orderId         String
+  specimenId      String?
+  analyteCodeLoinc String
+  resultType      String   // numeric, categorical, microbiology, text, image
+  valueNumber     Float?
+  unitUcum        String?
+  valueCode       String?
+  valueText       String?
+  codeSystem      String?
+  refRangeLow     Float?
+  refRangeHigh    Float?
+  flags           String[] // critical, abnormal, delta-check-failed
+  finalizedAt     DateTime?
+  performerId     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  order           LabOrder   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  specimen        LabSpecimen? @relation(fields: [specimenId], references: [id], onDelete: SetNull)
+  microOrganisms  LabMicroOrganism[]
+  susceptibilities LabMicroSusceptibility[]
+
+  @@index([orderId])
+  @@index([specimenId])
+  @@index([analyteCodeLoinc])
+  @@index([finalizedAt])
+  @@index([resultType])
+}
+
+// Microbiology Organisms - Analytical stage
+model LabMicroOrganism {
+  id              String   @id @default(uuid())
+  resultId         String
+  organismCodeSnomed String
+  organismDisplay  String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  result          LabResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+  susceptibilities LabMicroSusceptibility[]
+
+  @@index([resultId])
+  @@index([organismCodeSnomed])
+}
+
+// Microbiology Susceptibilities - Analytical stage
+model LabMicroSusceptibility {
+  id                  String   @id @default(uuid())
+  organismId          String
+  resultId            String
+  antibioticCode      String   // RxNorm/ATC
+  antibioticDisplay   String
+  method              String?  // MIC, Disk diffusion
+  micValueNumber      Float?
+  micUnitUcum         String?
+  interpretationCode  String   // S, I, R
+  interpretationSystem String? // EUCAST, CLSI
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  organism            LabMicroOrganism @relation(fields: [organismId], references: [id], onDelete: Cascade)
+  result              LabResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+
+  @@index([organismId])
+  @@index([resultId])
+  @@index([antibioticCode])
+  @@index([interpretationCode])
+}
+
+// Vocabulary Cache - Cached from Vocabulary Service
+model VocabularyCache {
+  id            String   @id @default(uuid())
+  listId        String
+  itemCode      String
+  itemDisplay   String
+  codeSystem    String?
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  status        String   @default("active")
+  locale        String?  @default("en")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([listId, itemCode])
+  @@index([listId])
+  @@index([itemCode])
+  @@index([status])
+}
+
+// Quality Control Results
+model QcResult {
+  id              String   @id @default(uuid())
+  instrumentId    String?
+  testCodeLoinc   String
+  qcMaterialLot   String
+  targetValue     Float?
+  acceptableRangeLow  Float?
+  acceptableRangeHigh Float?
+  actualValue     Float
+  unitUcum        String?
+  qcRuleViolations String[] // 1-2s, 1-3s, 2-2s, R-4s, 4-1s, 10x
+  status          String   // pass, fail, warning
+  runAt           DateTime @default(now())
+  performerId     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([instrumentId])
+  @@index([testCodeLoinc])
+  @@index([runAt])
+  @@index([status])
+}
+
+// Worklists - Analytical stage
+model Worklist {
+  id            String   @id @default(uuid())
+  section       String   // Hematology, Chemistry, Microbiology, etc.
+  instrumentId  String?
+  priority      String?  // stat, urgent, routine
+  status        String   @default("pending") // pending, in-progress, completed
+  generatedAt   DateTime @default(now())
+  completedAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items         WorklistItem[]
+
+  @@index([section])
+  @@index([status])
+  @@index([generatedAt])
+}
+
+model WorklistItem {
+  id          String   @id @default(uuid())
+  worklistId  String
+  orderId     String
+  testCodeLoinc String
+  assignedTo  String?
+  status      String   @default("pending") // pending, in-progress, completed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  worklist   Worklist @relation(fields: [worklistId], references: [id], onDelete: Cascade)
+
+  @@index([worklistId])
+  @@index([orderId])
+  @@index([status])
+}
+

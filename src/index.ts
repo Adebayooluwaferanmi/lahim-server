@@ -1,5 +1,13 @@
 // we need this file because of this issue: https://github.com/fastify/fastify-cli/issues/131
 import 'make-promises-safe'
+
+// Initialize OpenTelemetry tracing before anything else
+// Temporarily disabled due to version compatibility issues
+// if (process.env.ENABLE_TRACING !== 'false') {
+//   const { initializeTracing } = require('./lib/tracing')
+//   initializeTracing()
+// }
+
 import Fastify from 'fastify'
 import hospitalRun from './app'
 

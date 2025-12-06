@@ -1,7 +1,6 @@
 declare module 'fastify-no-icon' {
-  import { Plugin } from 'fastify'
-  import http from 'http'
+  import { FastifyPlugin } from 'fastify'
 
-  let noIcon: Plugin<http.Server, http.IncomingMessage, http.ServerResponse, {}>
+  let noIcon: FastifyPlugin
   export default noIcon
 }

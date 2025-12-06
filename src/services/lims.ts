@@ -1,11 +1,11 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { nextCallback } from 'fastify-plugin'
+import { FastifyError } from 'fastify'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: nextCallback,
+  next: (err?: FastifyError) => void,
 ) => {
   const db = fastify.couch.db.use('lab_results')
   const testCatalogDb = fastify.couch.db.use('test_catalog')
@@ -132,6 +132,23 @@ export default (
       }
 
       const insertResult = await db.insert(newResult)
+
+      // Publish event
+      try {
+        const { eventBus } = require('../lib/event-bus')
+        const eventType = newResult.status === 'final' ? 'lab.result.finalized' : 'lab.result.created'
+        await eventBus.publish(
+          eventBus.createEvent(
+            eventType as any,
+            insertResult.id,
+            'lab-result',
+            newResult,
+            { userId: (fastify as any).user?.id }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish lab result event')
+      }
 
       // Check for critical values (async, don't block result creation)
       if (result.resultType === 'numeric' && result.numericValue !== undefined) {

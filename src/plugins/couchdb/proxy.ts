@@ -5,7 +5,7 @@ interface Options {
   url: string
 }
 
-function couchDBProxy(
+export function couchDBProxy(
   fastify: FastifyInstance,
   options: Options,
   next: (err?: FastifyError | undefined) => void,
@@ -17,9 +17,3 @@ function couchDBProxy(
   })
   next()
 }
-
-couchDBProxy.autoConfig = {
-  url: process.env.COUCHDB_URL,
-}
-
-export default couchDBProxy

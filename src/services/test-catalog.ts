@@ -1,18 +1,38 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { nextCallback } from 'fastify-plugin'
+import { FastifyError } from 'fastify'
+import { createCouchDBIndexes } from '../lib/db-utils'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: nextCallback,
+  next: (err?: FastifyError) => void,
 ) => {
-  const db = fastify.couch.db.use('test_catalog')
+  const db = fastify.couchAvailable && fastify.couch 
+    ? fastify.couch.db.use('test_catalog')
+    : null
+
+  // Create indexes on service load
+  createCouchDBIndexes(
+    fastify,
+    'test_catalog',
+    [
+      { index: { fields: ['type'] }, name: 'type-index' },
+      { index: { fields: ['type', 'code'] }, name: 'type-code-index' },
+      { index: { fields: ['type', 'active'] }, name: 'type-active-index' },
+      { index: { fields: ['type', 'department'] }, name: 'type-department-index' },
+    ],
+    'Test catalog'
+  )
 
   // GET /test-catalog - List all test catalog entries
   fastify.get('/test-catalog', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
-      const { limit = 50, skip = 0, active, department } = request.query as any
+      const { limit = 50, skip = 0, active, department, code } = request.query as any
       const selector: any = { type: 'testCatalogEntry' }
 
       if (active !== undefined) {
@@ -20,6 +40,9 @@ export default (
       }
       if (department) {
         selector.department = department
+      }
+      if (code) {
+        selector.code = code
       }
 
       const result = await db.find({
@@ -30,7 +53,13 @@ export default (
       })
 
       fastify.log.info({ count: result.docs.length, limit, skip }, 'test_catalog.list')
-      reply.send({ entries: result.docs, count: result.docs.length })
+      
+      // If code is specified, return single entry, otherwise return list
+      if (code && result.docs.length > 0) {
+        reply.send(result.docs[0])
+      } else {
+        reply.send({ entries: result.docs, count: result.docs.length })
+      }
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'test_catalog.list_failed')
       reply.code(500).send({ error: 'Failed to list test catalog entries' })
@@ -39,6 +68,10 @@ export default (
 
   // GET /test-catalog/:id - Get single test catalog entry
   fastify.get('/test-catalog/:id', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const doc = await db.get(id)
@@ -62,6 +95,10 @@ export default (
 
   // POST /test-catalog - Create new test catalog entry
   fastify.post('/test-catalog', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const entry = request.body as any
 
@@ -102,6 +139,10 @@ export default (
 
   // PUT /test-catalog/:id - Update test catalog entry
   fastify.put('/test-catalog/:id', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const updates = request.body as any
@@ -148,6 +189,10 @@ export default (
 
   // DELETE /test-catalog/:id - Soft delete (set active: false)
   fastify.delete('/test-catalog/:id', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const existing = await db.get(id) as any

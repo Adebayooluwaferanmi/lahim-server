@@ -1,11 +1,11 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { nextCallback } from 'fastify-plugin'
+import { FastifyError } from 'fastify'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: nextCallback,
+  next: (err?: FastifyError) => void,
 ) => {
   const db = fastify.couch.db.use('lab_orders')
 
@@ -78,6 +78,22 @@ export default (
 
       const result = await db.insert(newOrder)
 
+      // Publish event
+      try {
+        const { eventBus } = require('../lib/event-bus')
+        await eventBus.publish(
+          eventBus.createEvent(
+            'lab.order.created',
+            result.id,
+            'lab-order',
+            newOrder,
+            { userId: (fastify as any).user?.id }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish lab order created event')
+      }
+
       fastify.log.info({ id: result.id, patientId: order.patientId }, 'lab_orders.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newOrder })
     } catch (error: unknown) {
@@ -106,6 +122,22 @@ export default (
       }
 
       const result = await db.insert(updated)
+
+      // Publish event
+      try {
+        const { eventBus } = require('../lib/event-bus')
+        await eventBus.publish(
+          eventBus.createEvent(
+            'lab.order.updated',
+            id,
+            'lab-order',
+            updated,
+            { userId: (fastify as any).user?.id }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish lab order updated event')
+      }
 
       fastify.log.info({ id }, 'lab_orders.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })

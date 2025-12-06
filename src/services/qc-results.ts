@@ -1,6 +1,6 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { nextCallback } from 'fastify-plugin'
+import { FastifyError } from 'fastify'
 
 const checkQCRequirement = async (
   fastify: FastifyInstance,
@@ -67,7 +67,7 @@ const checkQCRequirement = async (
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: nextCallback,
+  next: (err?: FastifyError) => void,
 ) => {
   const db = fastify.couch.db.use('qc_results')
 
@@ -135,18 +135,74 @@ export default (
         fastify.log.warn({ testCode: testCodeValue, reason: qcRequirement.reason }, 'QC result created but not required')
       }
 
+      // Evaluate Westgard rules if mean and SD are provided
+      let westgardViolations: string[] = []
+      let qcStatus = 'pass'
+      
+      if (qcResult.targetValue && qcResult.acceptableRangeLow !== undefined && qcResult.acceptableRangeHigh !== undefined) {
+        const mean = qcResult.targetValue
+        const sd = (qcResult.acceptableRangeHigh - qcResult.acceptableRangeLow) / 4 // Approximate SD from range
+        
+        try {
+          const { evaluateWestgardRules } = await import('./westgard-rules')
+          
+          // Get previous results for trend analysis
+          const prevResult = await db.find({
+            selector: {
+              type: 'qc_result',
+              'testCode.coding.code': testCodeValue,
+              materialId: qcResult.materialId,
+              ...(qcResult.instrumentId ? { instrumentId: qcResult.instrumentId } : {}),
+            },
+            sort: [{ runDate: 'desc' }],
+            limit: 10,
+          })
+          
+          const violations = evaluateWestgardRules(
+            { ...qcResult, actualValue: qcResult.result || qcResult.actualValue },
+            prevResult.docs as any[],
+            mean,
+            sd,
+          )
+          
+          westgardViolations = violations.map((v) => v.rule)
+          qcStatus = violations.some((v) => v.severity === 'error') ? 'fail' : violations.length > 0 ? 'warning' : 'pass'
+        } catch (westgardError) {
+          fastify.log.warn({ error: westgardError }, 'Failed to evaluate Westgard rules')
+        }
+      }
+
       const now = new Date().toISOString()
       const newQCResult = {
         ...qcResult,
         type: 'qc_result',
         runDate: qcResult.runDate || now,
+        qcRuleViolations: westgardViolations,
+        status: qcResult.status || qcStatus,
         createdAt: now,
         updatedAt: now,
       }
 
       const result = await db.insert(newQCResult)
 
-      fastify.log.info({ id: result.id, testCode: testCodeValue }, 'qc_results.created')
+      // Publish event
+      try {
+        const { eventBus } = require('../lib/event-bus')
+        const eventType = qcStatus === 'fail' ? 'qc.result.failed' : 'qc.result.entered'
+        await eventBus.publish(
+          eventBus.createEvent(
+            eventType as any,
+            result.id,
+            'qc-result',
+            newQCResult,
+            { userId: (fastify as any).user?.id }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish QC result event')
+      }
+
+      fastify.log.info({ id: result.id, testCode: testCodeValue, status: qcStatus, violations: westgardViolations.length }, 'qc_results.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newQCResult })
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'qc_results.create_failed')

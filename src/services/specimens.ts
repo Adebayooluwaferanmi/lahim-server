@@ -1,6 +1,7 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { nextCallback } from 'fastify-plugin'
+import { FastifyError } from 'fastify'
+import { createCouchDBIndexes } from '../lib/db-utils'
 
 const addChainOfCustody = (specimen: any, action: string, performedBy: string, location: string, notes?: string) => {
   const chain = specimen.chainOfCustody || []
@@ -17,12 +18,33 @@ const addChainOfCustody = (specimen: any, action: string, performedBy: string, l
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: nextCallback,
+  next: (err?: FastifyError) => void,
 ) => {
-  const db = fastify.couch.db.use('specimens')
+  const db = fastify.couchAvailable && fastify.couch 
+    ? fastify.couch.db.use('specimens')
+    : null
+
+  // Create indexes on service load
+  createCouchDBIndexes(
+    fastify,
+    'specimens',
+    [
+      { index: { fields: ['type'] }, name: 'type-index' },
+      { index: { fields: ['type', 'collectedOn'] }, name: 'type-collectedOn-index' },
+      { index: { fields: ['collectedOn'] }, name: 'collectedOn-index' },
+      { index: { fields: ['type', 'status'] }, name: 'type-status-index' },
+      { index: { fields: ['type', 'patientId'] }, name: 'type-patientId-index' },
+      { index: { fields: ['type', 'orderId'] }, name: 'type-orderId-index' },
+    ],
+    'Specimens'
+  )
 
   // GET /specimens - List specimens
   fastify.get('/specimens', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { limit = 50, skip = 0, status, patientId, orderId } = request.query as any
       const selector: any = { type: 'specimen' }
@@ -35,7 +57,7 @@ export default (
         selector,
         limit: parseInt(limit, 10),
         skip: parseInt(skip, 10),
-        sort: [{ collectedOn: 'desc' }],
+        sort: [{ collectedOn: 'desc' }], // Sort by collectedOn desc only (CouchDB doesn't support mixed directions)
       })
 
       fastify.log.info({ count: result.docs.length }, 'specimens.list')
@@ -48,6 +70,10 @@ export default (
 
   // GET /specimens/:id - Get single specimen
   fastify.get('/specimens/:id', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const doc = await db.get(id)
@@ -71,6 +97,10 @@ export default (
 
   // POST /specimens/:id/register - Register/receive specimen
   fastify.post('/specimens/:id/register', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const {
@@ -118,6 +148,22 @@ export default (
       const updated = { ...existing, ...updates }
       const updateResult = await db.insert(updated)
 
+      // Publish event
+      try {
+        const { eventBus } = require('../lib/event-bus')
+        await eventBus.publish(
+          eventBus.createEvent(
+            'specimen.received',
+            id,
+            'specimen',
+            updated,
+            { userId: receivedBy }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish specimen received event')
+      }
+
       fastify.log.info({ id, receivedBy }, 'specimens.registered')
       reply.send({ id: updateResult.id, rev: updateResult.rev, status: updated.status })
     } catch (error: unknown) {
@@ -132,6 +178,10 @@ export default (
 
   // POST /specimens/:id/process - Process specimen (centrifugation, pre-analytical QC)
   fastify.post('/specimens/:id/process', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const {
@@ -214,6 +264,10 @@ export default (
 
   // POST /specimens/:id/aliquots - Create aliquots
   fastify.post('/specimens/:id/aliquots', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const { aliquots, createdBy } = request.body as any
