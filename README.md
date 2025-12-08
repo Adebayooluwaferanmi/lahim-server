@@ -1,4 +1,4 @@
-# HospitalRun Server
+# LaHIM Server
 
 <div align="center">
 
@@ -7,7 +7,7 @@
 
 </div>
 
-Node.js backend for [HospitalRun](http://hospitalrun.io/): free software for developing world hospitals. To contribute, follow the guidelines in this readme or alternatively ask for details on the community Slack channel: [#contributors](https://hospitalrun-slack.herokuapp.com).
+Node.js backend for LaHIM (Laboratory & Health Information Management System): A modern transformation of HospitalRun for laboratory-first healthcare systems. To contribute, follow the guidelines in this readme or alternatively ask for details on the community Slack channel: [#contributors](https://hospitalrun-slack.herokuapp.com).
 
 ---
 

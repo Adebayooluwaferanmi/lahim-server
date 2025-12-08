@@ -1,12 +1,17 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
+import { createCouchDBIndexes } from '../lib/db-utils'
 
 const checkQCRequirement = async (
   fastify: FastifyInstance,
   testCode: string,
   instrumentId?: string,
 ): Promise<{ required: boolean; reason?: string }> => {
+  if (!fastify.couchAvailable || !fastify.couch) {
+    return { required: false, reason: 'CouchDB not available' }
+  }
+
   try {
     const testCatalogDb = fastify.couch.db.use('test_catalog')
     const catalogResult = await testCatalogDb.find({
@@ -69,7 +74,28 @@ export default (
   _: {},
   next: (err?: FastifyError) => void,
 ) => {
+  // Only create database reference if CouchDB is available
+  if (!fastify.couchAvailable || !fastify.couch) {
+    fastify.log.warn('QC Results service: CouchDB not available - endpoints will return errors')
+    next()
+    return
+  }
+
   const db = fastify.couch.db.use('qc_results')
+
+  // Create indexes for sorted queries
+  createCouchDBIndexes(
+    fastify,
+    'qc_results',
+    [
+      { index: { fields: ['type'] }, name: 'type-index' },
+      { index: { fields: ['type', 'runDate'] }, name: 'type-runDate-index' },
+      { index: { fields: ['type', 'testCode.coding.code'] }, name: 'type-testCode-index' },
+      { index: { fields: ['type', 'instrumentId'] }, name: 'type-instrumentId-index' },
+      { index: { fields: ['runDate'] }, name: 'runDate-index' },
+    ],
+    'QC Results'
+  )
 
   // GET /qc-results - List QC results
   fastify.get('/qc-results', async (request, reply) => {

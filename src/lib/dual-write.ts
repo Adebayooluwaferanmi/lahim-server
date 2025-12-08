@@ -302,7 +302,7 @@ export class DualWriteHelper {
   /**
    * Delay helper
    */
-  private delay(ms: number): Promise<void> {
+  protected delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
   }
 }

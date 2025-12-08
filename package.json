@@ -1,7 +1,7 @@
 {
   "name": "@hospitalrun/server",
   "version": "2.0.0-alpha.1",
-  "description": "HospitalRun Nodejs server",
+  "description": "LaHIM Nodejs server - Laboratory & Health Information Management System",
   "main": "dist",
   "repository": {
     "type": "git",
@@ -26,6 +26,10 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "db:seed": "ts-node prisma/seed.ts",
+    "seed:all": "ts-node -r dotenv/config src/scripts/seed-all-data.ts",
+    "seed:vocabularies": "ts-node -r dotenv/config src/scripts/seed-all-data.ts --vocabularies-only",
+    "migrate:couchdb": "ts-node -r dotenv/config src/scripts/migrate-couchdb-to-postgres.ts",
+    "test:dual-write": "ts-node -r dotenv/config src/scripts/test-dual-write.ts",
     "update": "yarn upgrade-interactive --latest",
     "lint": "eslint \"src/**/*.{js,jsx,ts,tsx}\" \"test/**/*.{js,jsx,ts,tsx}\"",
     "lint:fix": "eslint \"src/**/*.{js,jsx,ts,tsx}\" \"test/**/*.{js,jsx,ts,tsx}\" --fix",

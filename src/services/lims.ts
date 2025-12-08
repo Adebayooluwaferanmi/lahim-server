@@ -1,6 +1,8 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
+import { eventBus } from '../lib/event-bus'
+import { createCouchDBIndexes } from '../lib/db-utils'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
@@ -9,6 +11,20 @@ export default (
 ) => {
   const db = fastify.couch.db.use('lab_results')
   const testCatalogDb = fastify.couch.db.use('test_catalog')
+
+  // Create indexes on service load
+  createCouchDBIndexes(
+    fastify,
+    'lab_results',
+    [
+      { index: { fields: ['type'] }, name: 'type-index' },
+      { index: { fields: ['type', 'status'] }, name: 'type-status-index' },
+      { index: { fields: ['type', 'patientId'] }, name: 'type-patientId-index' },
+      { index: { fields: ['type', 'reportedDateTime'] }, name: 'type-reportedDateTime-index' },
+      { index: { fields: ['type', 'status', 'reportedDateTime'] }, name: 'type-status-reportedDateTime-index' },
+    ],
+    'Lab Results'
+  )
 
   // GET /lab-results - List lab results
   fastify.get('/lab-results', async (request, reply) => {
@@ -135,11 +151,10 @@ export default (
 
       // Publish event
       try {
-        const { eventBus } = require('../lib/event-bus')
         const eventType = newResult.status === 'final' ? 'lab.result.finalized' : 'lab.result.created'
         await eventBus.publish(
           eventBus.createEvent(
-            eventType as any,
+            eventType,
             insertResult.id,
             'lab-result',
             newResult,
@@ -192,6 +207,24 @@ export default (
 
       const result = await db.insert(updated)
 
+      // Publish event - check if status changed to finalized
+      const eventType = updated.status === 'final' && existing.status !== 'final' 
+        ? 'lab.result.finalized' 
+        : 'lab.result.updated'
+      try {
+        await eventBus.publish(
+          eventBus.createEvent(
+            eventType,
+            id,
+            'lab-result',
+            updated,
+            { userId: (fastify as any).user?.id }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, `Failed to publish ${eventType} event`)
+      }
+
       fastify.log.info({ id }, 'lab_results.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })
     } catch (error: unknown) {
@@ -201,6 +234,219 @@ export default (
       }
       fastify.log.error({ error: error as Error, id: (request.params as any).id }, 'lab_results.update_failed')
       reply.code(500).send({ error: 'Failed to update lab result' })
+    }
+  })
+
+  // POST /lab-results/:id/review - Pathologist review
+  fastify.post('/lab-results/:id/review', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string }
+      const { reviewedBy, reviewNotes, reviewStatus, clinicalSignificance } = request.body as any
+
+      if (!reviewedBy) {
+        reply.code(400).send({ error: 'Reviewed by is required' })
+        return
+      }
+
+      const existing = await db.get(id) as any
+
+      if (existing.type !== 'lab_result') {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+
+      const now = new Date().toISOString()
+      const updated = {
+        ...existing,
+        interpretation: {
+          ...existing.interpretation,
+          reviewedBy,
+          reviewNotes: reviewNotes || existing.interpretation?.reviewNotes,
+          reviewStatus: reviewStatus || 'reviewed', // reviewed, pending, approved
+          reviewedOn: now,
+          clinicalSignificance: clinicalSignificance || existing.interpretation?.clinicalSignificance,
+        },
+        updatedAt: now,
+      }
+
+      const result = await db.insert(updated)
+
+      // Publish event
+      try {
+        await eventBus.publish(
+          eventBus.createEvent(
+            'lab.result.reviewed',
+            id,
+            'lab-result',
+            updated,
+            { userId: reviewedBy }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish lab result reviewed event')
+      }
+
+      fastify.log.info({ id, reviewedBy }, 'lab_results.reviewed')
+      reply.send({ id: result.id, rev: result.rev, ...updated })
+    } catch (error: unknown) {
+      if ((error as any)?.status === 404) {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+      fastify.log.error({ error: error as Error, id: (request.params as any).id }, 'lab_results.review_failed')
+      reply.code(500).send({ error: 'Failed to review lab result' })
+    }
+  })
+
+  // POST /lab-results/:id/addendum - Add addendum
+  fastify.post('/lab-results/:id/addendum', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string }
+      const { addendumText, addedBy } = request.body as any
+
+      if (!addendumText || !addedBy) {
+        reply.code(400).send({ error: 'Addendum text and added by are required' })
+        return
+      }
+
+      const existing = await db.get(id) as any
+
+      if (existing.type !== 'lab_result') {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+
+      const now = new Date().toISOString()
+      const addendum = {
+        text: addendumText,
+        addedBy,
+        addedOn: now,
+      }
+
+      const updated = {
+        ...existing,
+        interpretation: {
+          ...existing.interpretation,
+          addendums: [...(existing.interpretation?.addendums || []), addendum],
+        },
+        updatedAt: now,
+      }
+
+      const result = await db.insert(updated)
+
+      // Publish event
+      try {
+        await eventBus.publish(
+          eventBus.createEvent(
+            'lab.result.addendum',
+            id,
+            'lab-result',
+            updated,
+            { userId: addedBy }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish lab result addendum event')
+      }
+
+      fastify.log.info({ id, addedBy }, 'lab_results.addendum_added')
+      reply.send({ id: result.id, rev: result.rev, ...updated })
+    } catch (error: unknown) {
+      if ((error as any)?.status === 404) {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+      fastify.log.error({ error: error as Error, id: (request.params as any).id }, 'lab_results.addendum_failed')
+      reply.code(500).send({ error: 'Failed to add addendum' })
+    }
+  })
+
+  // POST /lab-results/:id/correlation - Add clinical correlation
+  fastify.post('/lab-results/:id/correlation', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string }
+      const { correlationText, correlatedBy, relatedResults } = request.body as any
+
+      if (!correlationText || !correlatedBy) {
+        reply.code(400).send({ error: 'Correlation text and correlated by are required' })
+        return
+      }
+
+      const existing = await db.get(id) as any
+
+      if (existing.type !== 'lab_result') {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+
+      const now = new Date().toISOString()
+      const correlation = {
+        text: correlationText,
+        correlatedBy,
+        correlatedOn: now,
+        relatedResults: relatedResults || [],
+      }
+
+      const updated = {
+        ...existing,
+        interpretation: {
+          ...existing.interpretation,
+          clinicalCorrelations: [...(existing.interpretation?.clinicalCorrelations || []), correlation],
+        },
+        updatedAt: now,
+      }
+
+      const result = await db.insert(updated)
+
+      // Publish event
+      try {
+        await eventBus.publish(
+          eventBus.createEvent(
+            'lab.result.correlation',
+            id,
+            'lab-result',
+            updated,
+            { userId: correlatedBy }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish lab result correlation event')
+      }
+
+      fastify.log.info({ id, correlatedBy }, 'lab_results.correlation_added')
+      reply.send({ id: result.id, rev: result.rev, ...updated })
+    } catch (error: unknown) {
+      if ((error as any)?.status === 404) {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+      fastify.log.error({ error: error as Error, id: (request.params as any).id }, 'lab_results.correlation_failed')
+      reply.code(500).send({ error: 'Failed to add clinical correlation' })
+    }
+  })
+
+  // GET /lab-results/:id/interpretation - Get interpretation data
+  fastify.get('/lab-results/:id/interpretation', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string }
+      const doc = await db.get(id) as any
+
+      if (doc.type !== 'lab_result') {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+
+      const interpretation = doc.interpretation || {}
+
+      fastify.log.debug({ id }, 'lab_results.interpretation_retrieved')
+      reply.send(interpretation)
+    } catch (error: unknown) {
+      if ((error as any)?.status === 404) {
+        reply.code(404).send({ error: 'Lab result not found' })
+        return
+      }
+      fastify.log.error({ error: error as Error, id: (request.params as any).id }, 'lab_results.interpretation_failed')
+      reply.code(500).send({ error: 'Failed to get interpretation' })
     }
   })
 

@@ -2,6 +2,9 @@ import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
 import { createCouchDBIndexes } from '../lib/db-utils'
+import { eventBus } from '../lib/event-bus'
+import { createSpecimenDualWriteHelper } from '../lib/dual-write-helpers/specimen-dual-write'
+import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
 
 const addChainOfCustody = (specimen: any, action: string, performedBy: string, location: string, notes?: string) => {
   const chain = specimen.chainOfCustody || []
@@ -23,6 +26,8 @@ export default (
   const db = fastify.couchAvailable && fastify.couch 
     ? fastify.couch.db.use('specimens')
     : null
+  const cache = createMetricsCacheHelper(fastify, 'specimens')
+  const dualWrite = fastify.prisma ? createSpecimenDualWriteHelper(fastify) : null
 
   // Create indexes on service load
   createCouchDBIndexes(
@@ -47,6 +52,17 @@ export default (
     }
     try {
       const { limit = 50, skip = 0, status, patientId, orderId } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `specimens:${status || 'all'}:${patientId || 'all'}:${orderId || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'specimens.list_cache_hit')
+        return reply.send(cached)
+      }
+
       const selector: any = { type: 'specimen' }
 
       if (status) selector.status = status
@@ -60,8 +76,13 @@ export default (
         sort: [{ collectedOn: 'desc' }], // Sort by collectedOn desc only (CouchDB doesn't support mixed directions)
       })
 
+      const response = { specimens: result.docs, count: result.docs.length }
+      
+      // Cache for 5 minutes
+      await cache.set(cacheKey, response, 300)
+
       fastify.log.info({ count: result.docs.length }, 'specimens.list')
-      reply.send({ specimens: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'specimens.list_failed')
       reply.code(500).send({ error: 'Failed to list specimens' })
@@ -146,11 +167,50 @@ export default (
       }
 
       const updated = { ...existing, ...updates }
-      const updateResult = await db.insert(updated)
+
+      // Use dual-write if available
+      let updateResult: { id: string; rev: string }
+      if (dualWrite && fastify.prisma) {
+        try {
+          const dualWriteResult = await dualWrite.updateSpecimen(id, updates, {
+            failOnCouchDB: false,
+            failOnPostgres: true,
+          })
+
+          if (!dualWriteResult.overall) {
+            fastify.log.error(
+              {
+                postgres: dualWriteResult.postgres.error,
+                couch: dualWriteResult.couch.error,
+              },
+              'Dual-write update failed, falling back to CouchDB only'
+            )
+            // Fallback to CouchDB only
+            const fallbackResult = await db.insert(updated)
+            updateResult = { id: fallbackResult.id, rev: fallbackResult.rev }
+          } else {
+            updateResult = {
+              id: dualWriteResult.postgres.id || dualWriteResult.couch.id || id,
+              rev: dualWriteResult.couch.rev || existing._rev || '',
+            }
+          }
+        } catch (dualWriteError) {
+          fastify.log.warn({ error: dualWriteError }, 'Dual-write update error, falling back to CouchDB only')
+          const fallbackResult = await db.insert(updated)
+          updateResult = { id: fallbackResult.id, rev: fallbackResult.rev }
+        }
+      } else {
+        // No dual-write available, use CouchDB only
+        const insertResult = await db.insert(updated)
+        updateResult = { id: insertResult.id, rev: insertResult.rev }
+      }
+
+      // Invalidate cache
+      await cache.delete(`specimen:${id}`)
+      await cache.deletePattern('specimens:*')
 
       // Publish event
       try {
-        const { eventBus } = require('../lib/event-bus')
         await eventBus.publish(
           eventBus.createEvent(
             'specimen.received',
@@ -248,7 +308,62 @@ export default (
       }
 
       const updated = { ...existing, ...updates }
-      const updateResult = await db.insert(updated)
+
+      // Use dual-write if available
+      let updateResult: { id: string; rev: string }
+      if (dualWrite && fastify.prisma) {
+        try {
+          const dualWriteResult = await dualWrite.updateSpecimen(id, updates, {
+            failOnCouchDB: false,
+            failOnPostgres: true,
+          })
+
+          if (!dualWriteResult.overall) {
+            fastify.log.error(
+              {
+                postgres: dualWriteResult.postgres.error,
+                couch: dualWriteResult.couch.error,
+              },
+              'Dual-write update failed, falling back to CouchDB only'
+            )
+            // Fallback to CouchDB only
+            const fallbackResult = await db.insert(updated)
+            updateResult = { id: fallbackResult.id, rev: fallbackResult.rev }
+          } else {
+            updateResult = {
+              id: dualWriteResult.postgres.id || dualWriteResult.couch.id || id,
+              rev: dualWriteResult.couch.rev || existing._rev || '',
+            }
+          }
+        } catch (dualWriteError) {
+          fastify.log.warn({ error: dualWriteError }, 'Dual-write update error, falling back to CouchDB only')
+          const fallbackResult = await db.insert(updated)
+          updateResult = { id: fallbackResult.id, rev: fallbackResult.rev }
+        }
+      } else {
+        // No dual-write available, use CouchDB only
+        const insertResult = await db.insert(updated)
+        updateResult = { id: insertResult.id, rev: insertResult.rev }
+      }
+
+      // Invalidate cache
+      await cache.delete(`specimen:${id}`)
+      await cache.deletePattern('specimens:*')
+
+      // Publish event
+      try {
+        await eventBus.publish(
+          eventBus.createEvent(
+            'specimen.processed',
+            id,
+            'specimen',
+            updated,
+            { userId: processedBy }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish specimen processed event')
+      }
 
       fastify.log.info({ id, status: updated.status, processedBy: updated.processing?.processedBy }, 'specimens.processed')
       reply.send({ id: updateResult.id, rev: updateResult.rev, status: updated.status })
@@ -298,15 +413,57 @@ export default (
         updatedAt: now,
       }
 
-      const updateResult = await db.insert(updated)
+      // Use dual-write if available
+      let updateResult: { id: string; rev: string }
+      if (dualWrite && fastify.prisma) {
+        try {
+          const dualWriteResult = await dualWrite.updateSpecimen(id, {
+            aliquots: updated.aliquots,
+            updatedAt: now,
+          }, {
+            failOnCouchDB: false,
+            failOnPostgres: true,
+          })
 
-      // Also create separate aliquot records
+          if (!dualWriteResult.overall) {
+            fastify.log.error(
+              {
+                postgres: dualWriteResult.postgres.error,
+                couch: dualWriteResult.couch.error,
+              },
+              'Dual-write update failed, falling back to CouchDB only'
+            )
+            // Fallback to CouchDB only
+            const fallbackResult = await db.insert(updated)
+            updateResult = { id: fallbackResult.id, rev: fallbackResult.rev }
+          } else {
+            updateResult = {
+              id: dualWriteResult.postgres.id || dualWriteResult.couch.id || id,
+              rev: dualWriteResult.couch.rev || existing._rev || '',
+            }
+          }
+        } catch (dualWriteError) {
+          fastify.log.warn({ error: dualWriteError }, 'Dual-write update error, falling back to CouchDB only')
+          const fallbackResult = await db.insert(updated)
+          updateResult = { id: fallbackResult.id, rev: fallbackResult.rev }
+        }
+      } else {
+        // No dual-write available, use CouchDB only
+        const insertResult = await db.insert(updated)
+        updateResult = { id: insertResult.id, rev: insertResult.rev }
+      }
+
+      // Also create separate aliquot records in CouchDB (for compatibility)
       for (const aliquot of newAliquots) {
+        try {
         await db.insert({
           ...aliquot,
           type: 'specimen_aliquot',
           specimenId: id,
         })
+        } catch (error) {
+          fastify.log.warn({ error, aliquotId: aliquot.id }, 'Failed to create separate aliquot record')
+        }
       }
 
       fastify.log.info({ id, count: newAliquots.length }, 'specimens.aliquots_created')

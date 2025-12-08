@@ -5,7 +5,7 @@ import helmet from '@fastify/helmet'
 import qs from 'qs'
 import cors from '@fastify/cors'
 
-function HospitalRun(fastify: FastifyInstance, opts: any, next: (err?: FastifyError) => void) {
+function LaHIM(fastify: FastifyInstance, opts: any, next: (err?: FastifyError) => void) {
   // CORS configuration - must specify origin when credentials are used
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001'
   const allowedOrigins = [
@@ -32,6 +32,22 @@ function HospitalRun(fastify: FastifyInstance, opts: any, next: (err?: FastifyEr
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   })
+  
+  // Ensure CORS headers are added even for 404 responses
+  fastify.addHook('onSend', async (request, reply, payload) => {
+    const origin = request.headers.origin as string | undefined
+    if (origin && allowedOrigins.includes(origin)) {
+      // Ensure CORS headers are present even for error responses
+      if (!reply.getHeader('Access-Control-Allow-Origin')) {
+        reply.header('Access-Control-Allow-Origin', origin)
+        reply.header('Access-Control-Allow-Credentials', 'true')
+        reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+        reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+      }
+    }
+    return payload
+  })
+  
   fastify.register(helmet)
 
   // Initialize event bus
@@ -53,16 +69,16 @@ function HospitalRun(fastify: FastifyInstance, opts: any, next: (err?: FastifyEr
   fastify.register(AutoLoad, {
     dir: join(__dirname, 'services'),
     options: { ...opts },
-    ignorePattern: /^(dual-write-service|event-handlers|lab-orders)\.(js|ts)$/,
+    ignorePattern: /^(dual-write-service|event-handlers|lab-orders-modern)\.(js|ts)$/,
   } as any)
 
   next()
 }
 
-HospitalRun.options = {
+LaHIM.options = {
   querystringParser: (str: string) => qs.parse(str),
   logger: true,
   ignoreTrailingSlash: true,
 }
 
-export = HospitalRun
+export = LaHIM

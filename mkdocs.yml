@@ -1,7 +1,7 @@
-site_name: HospitalRun
+site_name: LaHIM
 site_url: https://hospitalrun.io
-site_description: HospitalRun project documentation
-site_author: HospitalRun Core Team
+site_description: LaHIM project documentation
+site_author: LaHIM Core Team
 
 repo_url: https://github.com/hospitalrun/hospitalrun-server/
 

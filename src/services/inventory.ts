@@ -1,6 +1,8 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
+import { eventBus, EventType } from '../lib/event-bus'
+import { CacheHelper } from '../lib/db-utils'
 import { createCouchDBIndexes } from '../lib/db-utils'
 
 export default (
@@ -11,6 +13,7 @@ export default (
   const db = fastify.couchAvailable && fastify.couch 
     ? fastify.couch.db.use('inventory')
     : null
+  const cache = fastify.redis ? new CacheHelper(fastify.redis) : null
 
   // Create indexes on service load
   createCouchDBIndexes(
@@ -35,6 +38,19 @@ export default (
     }
     try {
       const { limit = 50, skip = 0, search, category, lowStock } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `inventory:items:${search || 'all'}:${category || 'all'}:${lowStock || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      if (cache) {
+        const cached = await cache.get(cacheKey)
+        if (cached) {
+          fastify.log.debug({ cacheKey }, 'inventory.items.list_cache_hit')
+          return reply.send(cached)
+        }
+      }
+      
       const selector: any = { type: 'inventory_item' }
 
       if (search) {
@@ -56,8 +72,15 @@ export default (
         sort: [{ itemName: 'asc' }],
       })
 
+      const response = { items: result.docs, count: result.docs.length }
+      
+      // Cache for 5 minutes
+      if (cache) {
+        await cache.set(cacheKey, response, 60 * 5)
+      }
+
       fastify.log.info({ count: result.docs.length }, 'inventory.items.list')
-      reply.send({ items: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'inventory.items.list_failed')
       reply.code(500).send({ error: 'Failed to list inventory items' })
@@ -72,11 +95,27 @@ export default (
     }
     try {
       const { id } = request.params as { id: string }
+      
+      // Try cache first
+      const cacheKey = `inventory:item:${id}`
+      if (cache) {
+        const cached = await cache.get(cacheKey)
+        if (cached) {
+          fastify.log.debug({ id }, 'inventory.items.get_cache_hit')
+          return reply.send(cached)
+        }
+      }
+      
       const doc = await db.get(id)
 
       if ((doc as any).type !== 'inventory_item') {
         reply.code(404).send({ error: 'Inventory item not found' })
         return
+      }
+
+      // Cache for 5 minutes
+      if (cache) {
+        await cache.set(cacheKey, doc, 60 * 5)
       }
 
       fastify.log.debug({ id }, 'inventory.items.get')
@@ -120,6 +159,21 @@ export default (
 
       const result = await db.insert(newItem)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('inventory:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'inventory.item.created',
+          result.id,
+          'inventory-item',
+          newItem
+        )
+      )
+
       fastify.log.info({ id: result.id, name: item.name }, 'inventory.items.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newItem })
     } catch (error: unknown) {
@@ -153,6 +207,21 @@ export default (
 
       const result = await db.insert(updated)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('inventory:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'inventory.item.updated',
+          result.id,
+          'inventory-item',
+          updated
+        )
+      )
+
       fastify.log.info({ id }, 'inventory.items.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })
     } catch (error: unknown) {
@@ -181,6 +250,21 @@ export default (
       }
 
       await db.destroy(id, (doc as any)._rev)
+
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('inventory:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'inventory.item.deleted',
+          id,
+          'inventory-item',
+          { id }
+        )
+      )
 
       fastify.log.info({ id }, 'inventory.items.deleted')
       reply.send({ id, deleted: true })
@@ -238,6 +322,28 @@ export default (
       }
 
       const result = await db.insert(updatedItem)
+
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('inventory:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'inventory.received',
+          itemId,
+          'inventory-transaction',
+          {
+            itemId,
+            quantity: parseFloat(quantity),
+            lotNumber,
+            expirationDate,
+            receivedBy,
+            transactionId: transaction._id || transaction.id,
+          }
+        )
+      )
 
       fastify.log.info({ itemId, quantity, receivedBy }, 'inventory.received')
       reply.code(201).send({ id: result.id, rev: result.rev, ...updatedItem })
@@ -299,6 +405,26 @@ export default (
 
       const result = await db.insert(updatedItem)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('inventory:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'inventory.issued',
+          itemId,
+          'inventory-transaction',
+          {
+            itemId,
+            quantity: parseFloat(quantity),
+            issuedTo,
+            transactionId: transaction._id || transaction.id,
+          }
+        )
+      )
+
       fastify.log.info({ itemId, quantity, issuedTo }, 'inventory.issued')
       reply.code(201).send({ id: result.id, rev: result.rev, ...updatedItem })
     } catch (error: unknown) {
@@ -319,6 +445,19 @@ export default (
     }
     try {
       const { category, lowStock } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `inventory:stock-levels:${category || 'all'}:${lowStock || 'all'}`
+      
+      // Try to get from cache
+      if (cache) {
+        const cached = await cache.get(cacheKey)
+        if (cached) {
+          fastify.log.debug({ cacheKey }, 'inventory.stock_levels.list_cache_hit')
+          return reply.send(cached)
+        }
+      }
+      
       const selector: any = { type: 'inventory_item' }
 
       if (category) selector.category = category
@@ -331,8 +470,15 @@ export default (
         sort: [{ itemName: 'asc' }], // Use itemName instead of name (matches the index)
       })
 
+      const response = { items: result.docs, count: result.docs.length }
+      
+      // Cache for 2 minutes (stock levels change more frequently)
+      if (cache) {
+        await cache.set(cacheKey, response, 60 * 2)
+      }
+
       fastify.log.info({ count: result.docs.length }, 'inventory.stock_levels.list')
-      reply.send({ items: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'inventory.stock_levels.list_failed')
       reply.code(500).send({ error: 'Failed to get stock levels' })

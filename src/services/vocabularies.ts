@@ -1,6 +1,8 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
+import { eventBus } from '../lib/event-bus'
+import { CacheHelper } from '../lib/db-utils'
 import { createCouchDBIndexes } from '../lib/db-utils'
 
 export default (
@@ -17,6 +19,7 @@ export default (
   const valueSetsDb = fastify.couchAvailable && fastify.couch
     ? fastify.couch.db.use('vocabularies_value_sets')
     : null
+  const cache = fastify.redis ? new CacheHelper(fastify.redis) : null
 
   // Create indexes on service load
   if (fastify.couchAvailable && fastify.couch) {
@@ -58,6 +61,19 @@ export default (
     }
     try {
       const { limit = 50, skip = 0, search, codeSystem } = request.query as any
+      
+      // Create cache key (vocabularies change infrequently, cache for 1 hour)
+      const cacheKey = `vocabularies:organisms:${search || 'all'}:${codeSystem || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      if (cache) {
+        const cached = await cache.get(cacheKey)
+        if (cached) {
+          fastify.log.debug({ cacheKey }, 'vocabularies.organisms.list_cache_hit')
+          return reply.send(cached)
+        }
+      }
+      
       const selector: any = { type: 'organism' }
 
       if (search) {
@@ -75,8 +91,15 @@ export default (
         sort: [{ display: 'asc' }],
       })
 
+      const response = { organisms: result.docs, count: result.docs.length }
+      
+      // Cache for 1 hour (vocabularies change infrequently)
+      if (cache) {
+        await cache.set(cacheKey, response, 60 * 60)
+      }
+
       fastify.log.info({ count: result.docs.length }, 'vocabularies.organisms.list')
-      reply.send({ organisms: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'vocabularies.organisms.list_failed')
       reply.code(500).send({ error: 'Failed to list organisms' })
@@ -136,6 +159,21 @@ export default (
 
       const result = await organismsDb.insert(newOrganism)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:organisms:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.organism.created' as any,
+          result.id,
+          'vocabulary-organism',
+          newOrganism
+        )
+      )
+
       fastify.log.info({ id: result.id, code: organism.code }, 'vocabularies.organisms.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newOrganism })
     } catch (error: unknown) {
@@ -169,6 +207,21 @@ export default (
 
       const result = await organismsDb.insert(updated)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:organisms:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.organism.updated' as any,
+          result.id,
+          'vocabulary-organism',
+          updated
+        )
+      )
+
       fastify.log.info({ id }, 'vocabularies.organisms.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })
     } catch (error: unknown) {
@@ -198,6 +251,21 @@ export default (
 
       await organismsDb.destroy(id, (doc as any)._rev)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:organisms:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.organism.deleted' as any,
+          id,
+          'vocabulary-organism',
+          { id }
+        )
+      )
+
       fastify.log.info({ id }, 'vocabularies.organisms.deleted')
       reply.send({ id, deleted: true })
     } catch (error: unknown) {
@@ -220,6 +288,19 @@ export default (
     }
     try {
       const { limit = 50, skip = 0, search, codeSystem } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `vocabularies:antibiotics:${search || 'all'}:${codeSystem || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      if (cache) {
+        const cached = await cache.get(cacheKey)
+        if (cached) {
+          fastify.log.debug({ cacheKey }, 'vocabularies.antibiotics.list_cache_hit')
+          return reply.send(cached)
+        }
+      }
+      
       const selector: any = { type: 'antibiotic' }
 
       if (search) {
@@ -237,8 +318,15 @@ export default (
         sort: [{ display: 'asc' }],
       })
 
+      const response = { antibiotics: result.docs, count: result.docs.length }
+      
+      // Cache for 1 hour
+      if (cache) {
+        await cache.set(cacheKey, response, 60 * 60)
+      }
+
       fastify.log.info({ count: result.docs.length }, 'vocabularies.antibiotics.list')
-      reply.send({ antibiotics: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'vocabularies.antibiotics.list_failed')
       reply.code(500).send({ error: 'Failed to list antibiotics' })
@@ -298,6 +386,21 @@ export default (
 
       const result = await antibioticsDb.insert(newAntibiotic)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:antibiotics:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.antibiotic.created' as any,
+          result.id,
+          'vocabulary-antibiotic',
+          newAntibiotic
+        )
+      )
+
       fastify.log.info({ id: result.id, code: antibiotic.code }, 'vocabularies.antibiotics.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newAntibiotic })
     } catch (error: unknown) {
@@ -331,6 +434,21 @@ export default (
 
       const result = await antibioticsDb.insert(updated)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:antibiotics:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.antibiotic.updated' as any,
+          result.id,
+          'vocabulary-antibiotic',
+          updated
+        )
+      )
+
       fastify.log.info({ id }, 'vocabularies.antibiotics.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })
     } catch (error: unknown) {
@@ -360,6 +478,21 @@ export default (
 
       await antibioticsDb.destroy(id, (doc as any)._rev)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:antibiotics:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.antibiotic.deleted' as any,
+          id,
+          'vocabulary-antibiotic',
+          { id }
+        )
+      )
+
       fastify.log.info({ id }, 'vocabularies.antibiotics.deleted')
       reply.send({ id, deleted: true })
     } catch (error: unknown) {
@@ -382,6 +515,19 @@ export default (
     }
     try {
       const { limit = 50, skip = 0, listId } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `vocabularies:value-sets:${listId || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      if (cache) {
+        const cached = await cache.get(cacheKey)
+        if (cached) {
+          fastify.log.debug({ cacheKey }, 'vocabularies.value_sets.list_cache_hit')
+          return reply.send(cached)
+        }
+      }
+      
       const selector: any = { type: 'value_set' }
 
       if (listId) selector.listId = listId
@@ -393,8 +539,15 @@ export default (
         sort: [{ listId: 'asc' }, { display: 'asc' }],
       })
 
+      const response = { valueSets: result.docs, count: result.docs.length }
+      
+      // Cache for 1 hour
+      if (cache) {
+        await cache.set(cacheKey, response, 60 * 60)
+      }
+
       fastify.log.info({ count: result.docs.length }, 'vocabularies.value_sets.list')
-      reply.send({ valueSets: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'vocabularies.value_sets.list_failed')
       reply.code(500).send({ error: 'Failed to list value sets' })
@@ -451,6 +604,21 @@ export default (
 
       const result = await valueSetsDb.insert(newValueSet)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:value-sets:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.value_set.created' as any,
+          result.id,
+          'vocabulary-value-set',
+          newValueSet
+        )
+      )
+
       fastify.log.info({ id: result.id, listId: valueSet.listId, code: valueSet.code }, 'vocabularies.value_sets.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newValueSet })
     } catch (error: unknown) {
@@ -484,6 +652,21 @@ export default (
 
       const result = await valueSetsDb.insert(updated)
 
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:value-sets:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.value_set.updated' as any,
+          result.id,
+          'vocabulary-value-set',
+          updated
+        )
+      )
+
       fastify.log.info({ id }, 'vocabularies.value_sets.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })
     } catch (error: unknown) {
@@ -512,6 +695,21 @@ export default (
       }
 
       await valueSetsDb.destroy(id, (doc as any)._rev)
+
+      // Invalidate cache
+      if (cache) {
+        await cache.deletePattern('vocabularies:value-sets:*')
+      }
+
+      // Publish event
+      await eventBus.publish(
+        eventBus.createEvent(
+          'vocabulary.value_set.deleted' as any,
+          id,
+          'vocabulary-value-set',
+          { id }
+        )
+      )
 
       fastify.log.info({ id }, 'vocabularies.value_sets.deleted')
       reply.send({ id, deleted: true })

@@ -11,47 +11,123 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// Critical Values - Post-analytical stage
+model CriticalValue {
+  id                 String    @id @default(uuid())
+  resultId           String
+  patientId          String
+  testCodeLoinc      String
+  testName           String?
+  value              Float
+  unitUcum           String?
+  referenceRangeLow  Float?
+  referenceRangeHigh Float?
+  status             String    @default("pending") // pending, acknowledged, resolved
+  detectedOn         DateTime  @default(now())
+  acknowledgedBy     String?
+  acknowledgedOn     DateTime?
+  notes              String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  // Relations
+  result  LabResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+  patient Patient   @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+
+  @@index([resultId])
+  @@index([patientId])
+  @@index([status])
+  @@index([detectedOn])
+}
+
+// Patients - Core entity
+model Patient {
+  id          String    @id @default(uuid())
+  patientId   String    @unique // External patient ID (e.g., P00001)
+  firstName   String?
+  lastName    String?
+  dateOfBirth DateTime?
+  sex         String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  labOrders      LabOrder[]
+  criticalValues CriticalValue[]
+
+  @@index([patientId])
+  @@index([lastName, firstName])
+}
+
+// Practitioners - Healthcare providers
+model Practitioner {
+  id             String   @id @default(uuid())
+  practitionerId String   @unique // External practitioner ID
+  firstName      String?
+  lastName       String?
+  title          String? // Dr., Nurse, etc.
+  department     String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  labOrders     LabOrder[]
+  labResults    LabResult[]
+  qcResults     QcResult[]
+  worklistItems WorklistItem[]
+
+  @@index([practitionerId])
+  @@index([lastName, firstName])
+}
+
 // Lab Orders - Pre-analytical stage
 model LabOrder {
-  id            String   @id @default(uuid())
-  patientId     String
-  testCodeLoinc String
-  status        String   // requested, approved, collected, received, in-progress, completed
-  priority      String?  // stat, urgent, routine, scheduled
-  orderedAt     DateTime @default(now())
-  collectedAt   DateTime?
-  receivedAt    DateTime?
-  finalizedAt   DateTime?
-  facilityId    String?
+  id             String    @id @default(uuid())
+  patientId      String
+  testCodeLoinc  String
+  status         String // requested, approved, collected, received, in-progress, completed
+  priority       String? // stat, urgent, routine, scheduled
+  orderedAt      DateTime  @default(now())
+  collectedAt    DateTime?
+  receivedAt     DateTime?
+  finalizedAt    DateTime?
+  facilityId     String?
   practitionerId String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   // Relations
   specimens     LabSpecimen[]
   results       LabResult[]
+  worklistItems WorklistItem[]
+  transports    SpecimenTransport[]
+  testCatalog   TestCatalog         @relation(fields: [testCodeLoinc], references: [code], onDelete: Restrict)
+  patient       Patient             @relation(fields: [patientId], references: [patientId], onDelete: Restrict)
+  practitioner  Practitioner?       @relation(fields: [practitionerId], references: [practitionerId], onDelete: SetNull)
 
   @@index([patientId])
   @@index([status])
   @@index([orderedAt])
   @@index([testCodeLoinc])
+  @@index([practitionerId])
 }
 
 // Lab Specimens - Pre-analytical stage
 model LabSpecimen {
-  id              String   @id @default(uuid())
-  orderId         String
+  id               String   @id @default(uuid())
+  orderId          String
   specimenTypeCode String
-  collectedAt     DateTime
-  container       String?
-  accessionNo     String   @unique
-  storageLocation String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  collectedAt      DateTime
+  container        String?
+  accessionNo      String   @unique
+  storageLocation  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   // Relations
-  order           LabOrder  @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  results         LabResult[]
+  order      LabOrder            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  results    LabResult[]
+  transports SpecimenTransport[]
 
   @@index([orderId])
   @@index([accessionNo])
@@ -60,48 +136,52 @@ model LabSpecimen {
 
 // Lab Results - Analytical stage
 model LabResult {
-  id              String   @id @default(uuid())
-  orderId         String
-  specimenId      String?
+  id               String    @id @default(uuid())
+  orderId          String
+  specimenId       String?
   analyteCodeLoinc String
-  resultType      String   // numeric, categorical, microbiology, text, image
-  valueNumber     Float?
-  unitUcum        String?
-  valueCode       String?
-  valueText       String?
-  codeSystem      String?
-  refRangeLow     Float?
-  refRangeHigh    Float?
-  flags           String[] // critical, abnormal, delta-check-failed
-  finalizedAt     DateTime?
-  performerId     String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  resultType       String // numeric, categorical, microbiology, text, image
+  valueNumber      Float?
+  unitUcum         String?
+  valueCode        String?
+  valueText        String?
+  codeSystem       String?
+  refRangeLow      Float?
+  refRangeHigh     Float?
+  flags            String[] // critical, abnormal, delta-check-failed
+  finalizedAt      DateTime?
+  performerId      String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   // Relations
-  order           LabOrder   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  specimen        LabSpecimen? @relation(fields: [specimenId], references: [id], onDelete: SetNull)
-  microOrganisms  LabMicroOrganism[]
+  order            LabOrder                 @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  specimen         LabSpecimen?             @relation(fields: [specimenId], references: [id], onDelete: SetNull)
+  testCatalog      TestCatalog              @relation(fields: [analyteCodeLoinc], references: [code], onDelete: Restrict)
+  performer        Practitioner?            @relation(fields: [performerId], references: [practitionerId], onDelete: SetNull)
+  microOrganisms   LabMicroOrganism[]
   susceptibilities LabMicroSusceptibility[]
+  criticalValues   CriticalValue[]
 
   @@index([orderId])
   @@index([specimenId])
   @@index([analyteCodeLoinc])
   @@index([finalizedAt])
   @@index([resultType])
+  @@index([performerId])
 }
 
 // Microbiology Organisms - Analytical stage
 model LabMicroOrganism {
-  id              String   @id @default(uuid())
-  resultId         String
+  id                 String   @id @default(uuid())
+  resultId           String
   organismCodeSnomed String
-  organismDisplay  String
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  organismDisplay    String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   // Relations
-  result          LabResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+  result           LabResult                @relation(fields: [resultId], references: [id], onDelete: Cascade)
   susceptibilities LabMicroSusceptibility[]
 
   @@index([resultId])
@@ -110,22 +190,22 @@ model LabMicroOrganism {
 
 // Microbiology Susceptibilities - Analytical stage
 model LabMicroSusceptibility {
-  id                  String   @id @default(uuid())
-  organismId          String
-  resultId            String
-  antibioticCode      String   // RxNorm/ATC
-  antibioticDisplay   String
-  method              String?  // MIC, Disk diffusion
-  micValueNumber      Float?
-  micUnitUcum         String?
-  interpretationCode  String   // S, I, R
+  id                   String   @id @default(uuid())
+  organismId           String
+  resultId             String
+  antibioticCode       String // RxNorm/ATC
+  antibioticDisplay    String
+  method               String? // MIC, Disk diffusion
+  micValueNumber       Float?
+  micUnitUcum          String?
+  interpretationCode   String // S, I, R
   interpretationSystem String? // EUCAST, CLSI
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
   // Relations
-  organism            LabMicroOrganism @relation(fields: [organismId], references: [id], onDelete: Cascade)
-  result              LabResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+  organism LabMicroOrganism @relation(fields: [organismId], references: [id], onDelete: Cascade)
+  result   LabResult        @relation(fields: [resultId], references: [id], onDelete: Cascade)
 
   @@index([organismId])
   @@index([resultId])
@@ -135,17 +215,17 @@ model LabMicroSusceptibility {
 
 // Vocabulary Cache - Cached from Vocabulary Service
 model VocabularyCache {
-  id            String   @id @default(uuid())
+  id            String    @id @default(uuid())
   listId        String
   itemCode      String
   itemDisplay   String
   codeSystem    String?
   effectiveFrom DateTime?
   effectiveTo   DateTime?
-  status        String   @default("active")
-  locale        String?  @default("en")
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  status        String    @default("active")
+  locale        String?   @default("en")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   @@unique([listId, itemCode])
   @@index([listId])
@@ -153,63 +233,198 @@ model VocabularyCache {
   @@index([status])
 }
 
+// Instruments - Laboratory equipment
+model Instrument {
+  id           String   @id @default(uuid())
+  name         String
+  type         String // analyzer, centrifuge, etc.
+  manufacturer String?
+  model        String?
+  serialNumber String?  @unique
+  status       String   @default("offline") // online, offline, maintenance
+  section      String? // Hematology, Chemistry, Microbiology, etc.
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  qcResults QcResult[]
+  worklists Worklist[]
+
+  @@index([status])
+  @@index([section])
+  @@index([name])
+}
+
+// Test Catalog - Laboratory test definitions
+model TestCatalog {
+  id         String   @id @default(uuid())
+  code       String   @unique // LOINC code
+  name       String
+  department String?
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  qcResults     QcResult[]
+  labOrders     LabOrder[]
+  labResults    LabResult[]
+  worklistItems WorklistItem[]
+
+  @@index([code])
+  @@index([active])
+  @@index([department])
+}
+
 // Quality Control Results
 model QcResult {
-  id              String   @id @default(uuid())
-  instrumentId    String?
-  testCodeLoinc   String
-  qcMaterialLot   String
-  targetValue     Float?
+  id                  String   @id @default(uuid())
+  instrumentId        String?
+  testCodeLoinc       String
+  qcMaterialLot       String
+  targetValue         Float?
   acceptableRangeLow  Float?
   acceptableRangeHigh Float?
-  actualValue     Float
-  unitUcum        String?
-  qcRuleViolations String[] // 1-2s, 1-3s, 2-2s, R-4s, 4-1s, 10x
-  status          String   // pass, fail, warning
-  runAt           DateTime @default(now())
-  performerId     String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  actualValue         Float
+  unitUcum            String?
+  qcRuleViolations    String[] // 1-2s, 1-3s, 2-2s, R-4s, 4-1s, 10x
+  status              String // pass, fail, warning
+  runAt               DateTime @default(now())
+  performerId         String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  // Relations
+  instrument  Instrument?   @relation(fields: [instrumentId], references: [id], onDelete: SetNull)
+  testCatalog TestCatalog   @relation(fields: [testCodeLoinc], references: [code], onDelete: Restrict)
+  performer   Practitioner? @relation(fields: [performerId], references: [practitionerId], onDelete: SetNull)
 
   @@index([instrumentId])
   @@index([testCodeLoinc])
   @@index([runAt])
   @@index([status])
+  @@index([performerId])
 }
 
 // Worklists - Analytical stage
 model Worklist {
-  id            String   @id @default(uuid())
-  section       String   // Hematology, Chemistry, Microbiology, etc.
-  instrumentId  String?
-  priority      String?  // stat, urgent, routine
-  status        String   @default("pending") // pending, in-progress, completed
-  generatedAt   DateTime @default(now())
-  completedAt   DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id           String    @id @default(uuid())
+  section      String // Hematology, Chemistry, Microbiology, etc.
+  instrumentId String?
+  priority     String? // stat, urgent, routine
+  status       String    @default("pending") // pending, in-progress, completed
+  generatedAt  DateTime  @default(now())
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
-  items         WorklistItem[]
+  // Relations
+  items      WorklistItem[]
+  instrument Instrument?    @relation(fields: [instrumentId], references: [id], onDelete: SetNull)
 
   @@index([section])
   @@index([status])
   @@index([generatedAt])
+  @@index([instrumentId])
 }
 
 model WorklistItem {
-  id          String   @id @default(uuid())
-  worklistId  String
-  orderId     String
+  id            String   @id @default(uuid())
+  worklistId    String
+  orderId       String
   testCodeLoinc String
-  assignedTo  String?
-  status      String   @default("pending") // pending, in-progress, completed
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  assignedTo    String?
+  status        String   @default("pending") // pending, in-progress, completed
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
-  worklist   Worklist @relation(fields: [worklistId], references: [id], onDelete: Cascade)
+  // Relations
+  worklist             Worklist      @relation(fields: [worklistId], references: [id], onDelete: Cascade)
+  order                LabOrder      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  testCatalog          TestCatalog   @relation(fields: [testCodeLoinc], references: [code], onDelete: Restrict)
+  assignedPractitioner Practitioner? @relation(fields: [assignedTo], references: [practitionerId], onDelete: SetNull)
 
   @@index([worklistId])
   @@index([orderId])
+  @@index([testCodeLoinc])
   @@index([status])
+  @@index([assignedTo])
 }
 
+// Specimen Transport - Logistics management
+model SpecimenTransport {
+  id             String    @id @default(uuid())
+  specimenId     String
+  orderId        String
+  transportType  String // internal, external, courier
+  origin         String
+  destination    String
+  carrier        String?
+  trackingNumber String?
+  status         String    @default("scheduled") // scheduled, in-transit, delivered, failed, cancelled
+  temperature    Float? // For temperature-sensitive specimens
+  scheduledAt    DateTime
+  pickedUpAt     DateTime?
+  deliveredAt    DateTime?
+  cost           Float?
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations
+  specimen LabSpecimen @relation(fields: [specimenId], references: [id], onDelete: Cascade)
+  order    LabOrder    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([specimenId])
+  @@index([orderId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([transportType])
+}
+
+// Equipment - Logistics management
+model Equipment {
+  id              String    @id @default(uuid())
+  name            String
+  type            String // analyzer, centrifuge, microscope, refrigerator, freezer, etc.
+  manufacturer    String?
+  model           String?
+  serialNumber    String?   @unique
+  location        String?
+  status          String    @default("active") // active, maintenance, retired, decommissioned
+  purchaseDate    DateTime?
+  warrantyExpiry  DateTime?
+  lastMaintenance DateTime?
+  nextMaintenance DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  maintenanceRecords EquipmentMaintenance[]
+
+  @@index([type])
+  @@index([status])
+  @@index([location])
+  @@index([name])
+}
+
+// Equipment Maintenance - Logistics management
+model EquipmentMaintenance {
+  id          String    @id @default(uuid())
+  equipmentId String
+  type        String // preventive, corrective, calibration, repair
+  scheduledAt DateTime
+  performedAt DateTime?
+  performedBy String?
+  cost        Float?
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relations
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Cascade)
+
+  @@index([equipmentId])
+  @@index([scheduledAt])
+  @@index([type])
+}

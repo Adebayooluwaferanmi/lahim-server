@@ -2,6 +2,7 @@ import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
 import { createCouchDBIndexes } from '../lib/db-utils'
+import { createTestCatalogDualWriteHelper } from '../lib/dual-write-helpers/test-catalog-dual-write'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
@@ -11,6 +12,7 @@ export default (
   const db = fastify.couchAvailable && fastify.couch 
     ? fastify.couch.db.use('test_catalog')
     : null
+  const dualWrite = fastify.prisma ? createTestCatalogDualWriteHelper(fastify) : null
 
   // Create indexes on service load
   createCouchDBIndexes(
@@ -127,7 +129,47 @@ export default (
         updatedAt: now,
       }
 
-      const result = await db.insert(newEntry)
+      // Use dual-write if available, otherwise fallback to CouchDB only
+      let result: { id: string; rev: string }
+      if (dualWrite && fastify.prisma) {
+        try {
+          // Generate ID if not provided
+          if (!newEntry._id) {
+            newEntry._id = `test_catalog_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+          }
+
+          const dualWriteResult = await dualWrite.writeTestCatalog(newEntry, {
+            failOnCouchDB: false,
+            failOnPostgres: true,
+          })
+
+          if (!dualWriteResult.overall) {
+            fastify.log.error(
+              { 
+                postgres: dualWriteResult.postgres.error,
+                couch: dualWriteResult.couch.error 
+              },
+              'Dual-write failed, falling back to CouchDB only'
+            )
+            // Fallback to CouchDB only
+            const fallbackResult = await db.insert(newEntry)
+            result = { id: fallbackResult.id, rev: fallbackResult.rev }
+          } else {
+            result = {
+              id: dualWriteResult.postgres.id || dualWriteResult.couch.id || newEntry._id,
+              rev: dualWriteResult.couch.rev || '',
+            }
+          }
+        } catch (dualWriteError) {
+          fastify.log.warn({ error: dualWriteError }, 'Dual-write error, falling back to CouchDB only')
+          const fallbackResult = await db.insert(newEntry)
+          result = { id: fallbackResult.id, rev: fallbackResult.rev }
+        }
+      } else {
+        // No dual-write available, use CouchDB only
+        const insertResult = await db.insert(newEntry)
+        result = { id: insertResult.id, rev: insertResult.rev }
+      }
 
       fastify.log.info({ id: result.id, code: entry.code }, 'test_catalog.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newEntry })
@@ -173,7 +215,42 @@ export default (
         updatedAt: new Date().toISOString(),
       }
 
-      const result = await db.insert(updated)
+      // Use dual-write if available
+      let result: { id: string; rev: string }
+      if (dualWrite && fastify.prisma) {
+        try {
+          const dualWriteResult = await dualWrite.updateTestCatalog(id, updates, {
+            failOnCouchDB: false,
+            failOnPostgres: true,
+          })
+
+          if (!dualWriteResult.overall) {
+            fastify.log.error(
+              {
+                postgres: dualWriteResult.postgres.error,
+                couch: dualWriteResult.couch.error,
+              },
+              'Dual-write update failed, falling back to CouchDB only'
+            )
+            // Fallback to CouchDB only
+            const fallbackResult = await db.insert(updated)
+            result = { id: fallbackResult.id, rev: fallbackResult.rev }
+          } else {
+            result = {
+              id: dualWriteResult.postgres.id || dualWriteResult.couch.id || id,
+              rev: dualWriteResult.couch.rev || existing._rev || '',
+            }
+          }
+        } catch (dualWriteError) {
+          fastify.log.warn({ error: dualWriteError }, 'Dual-write update error, falling back to CouchDB only')
+          const fallbackResult = await db.insert(updated)
+          result = { id: fallbackResult.id, rev: fallbackResult.rev }
+        }
+      } else {
+        // No dual-write available, use CouchDB only
+        const insertResult = await db.insert(updated)
+        result = { id: insertResult.id, rev: insertResult.rev }
+      }
 
       fastify.log.info({ id }, 'test_catalog.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })
@@ -208,7 +285,21 @@ export default (
         updatedAt: new Date().toISOString(),
       }
 
-      await db.insert(updated)
+      // Use dual-write if available (soft delete)
+      if (dualWrite && fastify.prisma) {
+        try {
+          await dualWrite.deleteTestCatalog(id, existing._rev || '', {
+            failOnCouchDB: false,
+            failOnPostgres: true,
+          })
+        } catch (dualWriteError) {
+          fastify.log.warn({ error: dualWriteError }, 'Dual-write delete error, falling back to CouchDB only')
+          await db.insert(updated)
+        }
+      } else {
+        // No dual-write available, use CouchDB only
+        await db.insert(updated)
+      }
 
       fastify.log.info({ id }, 'test_catalog.deleted')
       reply.send({ id, message: 'Test catalog entry deactivated' })

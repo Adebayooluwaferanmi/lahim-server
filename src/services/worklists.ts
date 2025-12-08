@@ -1,18 +1,45 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
+import { createCouchDBIndexes } from '../lib/db-utils'
+import { eventBus } from '../lib/event-bus'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
   next: (err?: FastifyError) => void,
 ) => {
-  const db = fastify.couch.db.use('worklists')
-  const labOrdersDb = fastify.couch.db.use('lab_orders')
-  const specimensDb = fastify.couch.db.use('specimens')
+  const db = fastify.couchAvailable && fastify.couch 
+    ? fastify.couch.db.use('worklists')
+    : null
+  const labOrdersDb = fastify.couchAvailable && fastify.couch
+    ? fastify.couch.db.use('lab_orders')
+    : null
+  const specimensDb = fastify.couchAvailable && fastify.couch
+    ? fastify.couch.db.use('specimens')
+    : null
+
+  // Create indexes on service load
+  createCouchDBIndexes(
+    fastify,
+    'worklists',
+    [
+      { index: { fields: ['type'] }, name: 'type-index' },
+      { index: { fields: ['type', 'date'] }, name: 'type-date-index' },
+      { index: { fields: ['type', 'createdAt'] }, name: 'type-createdAt-index' },
+      { index: { fields: ['type', 'date', 'createdAt'] }, name: 'type-date-createdAt-index' },
+      { index: { fields: ['date'] }, name: 'date-index' },
+      { index: { fields: ['createdAt'] }, name: 'createdAt-index' },
+    ],
+    'Worklists'
+  )
 
   // GET /worklists - List worklists
   fastify.get('/worklists', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { limit = 50, skip = 0, status, date } = request.query as any
       const selector: any = { type: 'worklist' }
@@ -24,7 +51,7 @@ export default (
         selector,
         limit: parseInt(limit, 10),
         skip: parseInt(skip, 10),
-        sort: [{ date: 'desc' }, { createdAt: 'desc' }],
+        sort: [{ date: 'desc' }, { createdAt: 'desc' }], // Multi-field sort requires composite index
       })
 
       fastify.log.info({ count: result.docs.length }, 'worklists.list')
@@ -37,6 +64,10 @@ export default (
 
   // GET /worklists/:id - Get single worklist
   fastify.get('/worklists/:id', async (request, reply) => {
+    if (!db) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { id } = request.params as { id: string }
       const doc = await db.get(id)
@@ -60,6 +91,10 @@ export default (
 
   // POST /worklists/generate - Generate worklist
   fastify.post('/worklists/generate', async (request, reply) => {
+    if (!db || !labOrdersDb || !specimensDb) {
+      reply.code(503).send({ error: 'CouchDB is not available' })
+      return
+    }
     try {
       const { date, testCodes, instrumentId, mode } = request.body as any
 
@@ -118,6 +153,21 @@ export default (
       }
 
       const result = await db.insert(newWorklist)
+
+      // Publish event
+      try {
+        await eventBus.publish(
+          eventBus.createEvent(
+            'worklist.generated',
+            result.id,
+            'worklist',
+            newWorklist,
+            { userId: (fastify as any).user?.id }
+          )
+        )
+      } catch (eventError) {
+        fastify.log.warn({ error: eventError }, 'Failed to publish worklist generated event')
+      }
 
       fastify.log.info({ id: result.id, date: targetDate, orderCount: matchingOrders.length }, 'worklists.generated')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newWorklist })

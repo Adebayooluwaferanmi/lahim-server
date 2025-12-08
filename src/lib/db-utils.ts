@@ -282,3 +282,68 @@ export async function createCouchDBIndexes(
   }
 }
 
+/**
+ * Ensure a CouchDB database exists, create it if it doesn't
+ * @param fastify - Fastify instance
+ * @param dbName - Database name
+ * @returns Promise that resolves when database is ready
+ * @throws Error if database cannot be created and doesn't exist
+ */
+export async function ensureCouchDBDatabase(
+  fastify: any, // FastifyInstance
+  dbName: string
+): Promise<void> {
+  if (!fastify.couchAvailable || !fastify.couch) {
+    const error = new Error(`CouchDB not available - cannot ensure database ${dbName}`)
+    fastify.log.warn(error.message)
+    throw error
+  }
+
+  try {
+    // Try to create the database - it will fail if it already exists, which is fine
+    await fastify.couch.db.create(dbName)
+    fastify.log.info(`Created CouchDB database: ${dbName}`)
+  } catch (error: any) {
+    const errorMessage = error?.message || String(error)
+    
+    // If database already exists, that's fine - verify it's accessible
+    if (
+      errorMessage.includes('file_exists') || 
+      errorMessage.includes('already exists') ||
+      errorMessage.includes('Database already exists')
+    ) {
+      fastify.log.debug(`CouchDB database ${dbName} already exists`)
+      
+      // Verify the database is accessible by trying to use it
+      try {
+        const testDb = fastify.couch.db.use(dbName)
+        // Try a simple operation to verify the database exists
+        await testDb.info()
+        return
+      } catch (verifyError: any) {
+        const verifyMessage = verifyError?.message || String(verifyError)
+        if (verifyMessage.includes('does not exist') || verifyMessage.includes('not found')) {
+          // Database doesn't actually exist, try creating again
+          fastify.log.warn(`Database ${dbName} reported as existing but not accessible, attempting to create`)
+          try {
+            await fastify.couch.db.create(dbName)
+            fastify.log.info(`Created CouchDB database: ${dbName} (retry)`)
+            return
+          } catch (retryError: any) {
+            throw new Error(`Failed to create CouchDB database ${dbName} after retry: ${retryError?.message || String(retryError)}`)
+          }
+        }
+        // Other errors during verification are fine - database exists
+        return
+      }
+    }
+    
+    // For other errors, throw so caller can handle it
+    fastify.log.error(
+      { error: errorMessage, db: dbName },
+      `Failed to ensure CouchDB database ${dbName}`
+    )
+    throw new Error(`Failed to create CouchDB database ${dbName}: ${errorMessage}`)
+  }
+}
+
