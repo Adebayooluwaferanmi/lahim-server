@@ -2,6 +2,7 @@ import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
 import { createCouchDBIndexes } from '../lib/db-utils'
+import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
 
 const checkQCRequirement = async (
   fastify: FastifyInstance,
@@ -82,6 +83,7 @@ export default (
   }
 
   const db = fastify.couch.db.use('qc_results')
+  const cache = createMetricsCacheHelper(fastify, 'qc-results')
 
   // Create indexes for sorted queries
   createCouchDBIndexes(
@@ -97,40 +99,179 @@ export default (
     'QC Results'
   )
 
-  // GET /qc-results - List QC results
+  // GET /qc-results - List QC results (with caching and PostgreSQL migration)
   fastify.get('/qc-results', async (request, reply) => {
     try {
       const { limit = 50, skip = 0, testCode, instrumentId } = request.query as any
-      const selector: any = { type: 'qc_result' }
+      
+      // Create cache key
+      const cacheKey = `qc-results:${testCode || 'all'}:${instrumentId || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'qc_results.list_cache_hit')
+        return reply.send(cached)
+      }
 
-      if (testCode) selector['testCode.coding.code'] = testCode
-      if (instrumentId) selector.instrumentId = instrumentId
+      // Try PostgreSQL first (if available), fallback to CouchDB
+      let results: any[] = []
+      let total = 0
 
-      const result = await db.find({
-        selector,
-        limit: parseInt(limit, 10),
-        skip: parseInt(skip, 10),
-        sort: [{ runDate: 'desc' }],
-      })
+      if (fastify.prisma) {
+        try {
+          const where: any = {}
+          if (testCode) where.testCodeLoinc = testCode
+          if (instrumentId) where.instrumentId = instrumentId
 
-      fastify.log.info({ count: result.docs.length }, 'qc_results.list')
-      reply.send({ results: result.docs, count: result.docs.length })
+          const [qcResults, count] = await Promise.all([
+            fastify.prisma.qcResult.findMany({
+              where,
+              take: parseInt(limit, 10),
+              skip: parseInt(skip, 10),
+              orderBy: { runAt: 'desc' },
+              include: {
+                instrument: true,
+                testCatalog: true,
+                performer: true,
+              },
+            }),
+            fastify.prisma.qcResult.count({ where }),
+          ])
+
+          // Map Prisma results to CouchDB-like format for compatibility
+          results = qcResults.map((r: any) => ({
+            _id: r.id,
+            type: 'qc_result',
+            testCode: {
+              coding: [{ code: r.testCodeLoinc }],
+            },
+            testName: r.testCatalog?.name,
+            instrumentId: r.instrumentId,
+            instrumentName: r.instrument?.name,
+            materialLot: r.qcMaterialLot,
+            targetValue: r.targetValue,
+            acceptableRangeLow: r.acceptableRangeLow,
+            acceptableRangeHigh: r.acceptableRangeHigh,
+            measuredValue: r.actualValue,
+            result: r.actualValue,
+            unitUcum: r.unitUcum,
+            qcRuleViolations: r.qcRuleViolations || [],
+            status: r.status,
+            runDate: r.runAt.toISOString(),
+            runNumber: r.id.substring(0, 8),
+            performerId: r.performerId,
+            createdAt: r.createdAt.toISOString(),
+            updatedAt: r.updatedAt.toISOString(),
+          }))
+          total = count
+        } catch (pgError) {
+          fastify.log.warn({ error: pgError }, 'PostgreSQL query failed, falling back to CouchDB')
+          // Fall through to CouchDB query
+        }
+      }
+
+      // Fallback to CouchDB if PostgreSQL not available or failed
+      if (results.length === 0 && total === 0) {
+        const selector: any = { type: 'qc_result' }
+
+        if (testCode) selector['testCode.coding.code'] = testCode
+        if (instrumentId) selector.instrumentId = instrumentId
+
+        const result = await db.find({
+          selector,
+          limit: parseInt(limit, 10),
+          skip: parseInt(skip, 10),
+          sort: [{ runDate: 'desc' }],
+        })
+
+        results = result.docs
+        total = result.docs.length
+      }
+
+      const response = { results, count: results.length, total }
+      
+      // Cache for 2 minutes (QC results change frequently)
+      await cache.set(cacheKey, response, 120)
+
+      fastify.log.info({ count: results.length }, 'qc_results.list')
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'qc_results.list_failed')
       reply.code(500).send({ error: 'Failed to list QC results' })
     }
   })
 
-  // GET /qc-results/:id - Get single QC result
+  // GET /qc-results/:id - Get single QC result (with caching)
   fastify.get('/qc-results/:id', async (request, reply) => {
     try {
       const { id } = request.params as { id: string }
-      const doc = await db.get(id)
-
-      if ((doc as any).type !== 'qc_result') {
-        reply.code(404).send({ error: 'QC result not found' })
-        return
+      
+      // Try cache first
+      const cacheKey = `qc-results:${id}`
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'qc_results.get_cache_hit')
+        return reply.send(cached)
       }
+
+      // Try PostgreSQL first, fallback to CouchDB
+      let doc: any = null
+
+      if (fastify.prisma) {
+        try {
+          const qcResult = await fastify.prisma.qcResult.findUnique({
+            where: { id },
+            include: {
+              instrument: true,
+              testCatalog: true,
+              performer: true,
+            },
+          })
+
+          if (qcResult) {
+            // Map to CouchDB-like format
+            doc = {
+              _id: qcResult.id,
+              type: 'qc_result',
+              testCode: {
+                coding: [{ code: qcResult.testCodeLoinc }],
+              },
+              testName: qcResult.testCatalog?.name,
+              instrumentId: qcResult.instrumentId,
+              instrumentName: qcResult.instrument?.name,
+              materialLot: qcResult.qcMaterialLot,
+              targetValue: qcResult.targetValue,
+              acceptableRangeLow: qcResult.acceptableRangeLow,
+              acceptableRangeHigh: qcResult.acceptableRangeHigh,
+              measuredValue: qcResult.actualValue,
+              result: qcResult.actualValue,
+              unitUcum: qcResult.unitUcum,
+              qcRuleViolations: qcResult.qcRuleViolations || [],
+              status: qcResult.status,
+              runDate: qcResult.runAt.toISOString(),
+              runNumber: qcResult.id.substring(0, 8),
+              performerId: qcResult.performerId,
+              createdAt: qcResult.createdAt.toISOString(),
+              updatedAt: qcResult.updatedAt.toISOString(),
+            }
+          }
+        } catch (pgError) {
+          fastify.log.warn({ error: pgError }, 'PostgreSQL query failed, falling back to CouchDB')
+        }
+      }
+
+      // Fallback to CouchDB
+      if (!doc) {
+        doc = await db.get(id)
+        if ((doc as any).type !== 'qc_result') {
+          reply.code(404).send({ error: 'QC result not found' })
+          return
+        }
+      }
+
+      // Cache for 5 minutes
+      await cache.set(cacheKey, doc, 300)
 
       fastify.log.debug({ id }, 'qc_results.get')
       reply.send(doc)
@@ -227,6 +368,9 @@ export default (
       } catch (eventError) {
         fastify.log.warn({ error: eventError }, 'Failed to publish QC result event')
       }
+
+      // Invalidate cache
+      await cache.deletePattern('qc-results:*')
 
       fastify.log.info({ id: result.id, testCode: testCodeValue, status: qcStatus, violations: westgardViolations.length }, 'qc_results.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newQCResult })

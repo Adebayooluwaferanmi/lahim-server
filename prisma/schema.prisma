@@ -84,7 +84,9 @@ model Practitioner {
 model LabOrder {
   id             String    @id @default(uuid())
   patientId      String
-  testCodeLoinc  String
+  testCodeLoinc  String?   // For individual tests (nullable if panel)
+  panelId        String?   // For panel orders (nullable if individual test)
+  isPanel        Boolean   @default(false) // True if this is a panel order
   status         String // requested, approved, collected, received, in-progress, completed
   priority       String? // stat, urgent, routine, scheduled
   orderedAt      DateTime  @default(now())
@@ -101,14 +103,16 @@ model LabOrder {
   results       LabResult[]
   worklistItems WorklistItem[]
   transports    SpecimenTransport[]
-  testCatalog   TestCatalog         @relation(fields: [testCodeLoinc], references: [code], onDelete: Restrict)
-  patient       Patient             @relation(fields: [patientId], references: [patientId], onDelete: Restrict)
-  practitioner  Practitioner?       @relation(fields: [practitionerId], references: [practitionerId], onDelete: SetNull)
+  testCatalog   TestCatalog?  @relation(fields: [testCodeLoinc], references: [code], onDelete: Restrict)
+  panel         TestPanel?     @relation(fields: [panelId], references: [id], onDelete: SetNull)
+  patient       Patient        @relation(fields: [patientId], references: [patientId], onDelete: Restrict)
+  practitioner  Practitioner?  @relation(fields: [practitionerId], references: [practitionerId], onDelete: SetNull)
 
   @@index([patientId])
   @@index([status])
   @@index([orderedAt])
   @@index([testCodeLoinc])
+  @@index([panelId])
   @@index([practitionerId])
 }
 
@@ -266,14 +270,62 @@ model TestCatalog {
   updatedAt  DateTime @updatedAt
 
   // Relations
-  qcResults     QcResult[]
-  labOrders     LabOrder[]
-  labResults    LabResult[]
-  worklistItems WorklistItem[]
+  qcResults           QcResult[]
+  labOrders           LabOrder[]
+  labResults          LabResult[]
+  worklistItems       WorklistItem[]
+  panelParameters     TestPanelParameter[]
 
   @@index([code])
   @@index([active])
   @@index([department])
+}
+
+// Test Panel - Groups of related tests (e.g., LFT, FBC)
+model TestPanel {
+  id          String   @id @default(uuid())
+  code        String   @unique // e.g., "LFT", "FBC", "LIPID"
+  name        String   // e.g., "Liver Function Test"
+  description String?
+  department  String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  parameters  TestPanelParameter[]
+  labOrders   LabOrder[]
+
+  @@index([code])
+  @@index([active])
+  @@index([department])
+}
+
+// Panel Parameters - Individual tests within a panel
+model TestPanelParameter {
+  id            String    @id @default(uuid())
+  panelId       String
+  parameterCode String    // LOINC code for the parameter
+  parameterName String    // Display name (e.g., "AST", "PCV")
+  sequence      Int       // Order in panel display
+  unit          String?   // UCUM unit code
+  refRangeLow   Float?
+  refRangeHigh  Float?
+  criticalLow   Float?
+  criticalHigh  Float?
+  defaultValue  String?
+  required      Boolean   @default(true) // Must be performed
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  panel         TestPanel   @relation(fields: [panelId], references: [id], onDelete: Cascade)
+  testCatalog   TestCatalog @relation(fields: [parameterCode], references: [code], onDelete: Restrict)
+
+  @@unique([panelId, parameterCode]) // One parameter per panel
+  @@index([panelId])
+  @@index([parameterCode])
 }
 
 // Quality Control Results

@@ -12,8 +12,8 @@ import {
 import { createDualWriteMetricsCollector } from '../monitoring/dual-write-metrics'
 
 export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
-  constructor(fastify: FastifyInstance) {
-    super(fastify, 'specimen_transport', createDualWriteMetricsCollector(fastify, 'specimen-transport'))
+  constructor(fastify: FastifyInstance, couch: any, prisma: any) {
+    super(fastify, couch, prisma)
   }
 
   async writeSpecimenTransport(
@@ -51,8 +51,7 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
           result.postgres.error = error as Error
           this.fastify.log.error(error, `PostgreSQL specimen transport write failed after ${retries} retries`)
           if (failOnPostgres) {
-            this.metrics.recordFailure('postgres')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -62,10 +61,10 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
     // Write to CouchDB
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        await this.couch.db.use('specimen_transport').insert(couchDoc)
+        const insertResult = await this.couch.insert(couchDoc)
         result.couch.success = true
-        result.couch.id = couchDoc._id
-        result.couch.rev = couchDoc._rev
+        result.couch.id = insertResult.id
+        result.couch.rev = insertResult.rev
         break
       } catch (error: any) {
         if (error.statusCode === 409) {
@@ -76,8 +75,7 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
           result.couch.error = error
           this.fastify.log.error(error, `CouchDB specimen transport write failed after ${retries} retries`)
           if (failOnCouchDB) {
-            this.metrics.recordFailure('couchdb')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -85,11 +83,10 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
     }
 
     result.overall = result.postgres.success && result.couch.success
-    if (result.overall) {
-      this.metrics.recordSuccess()
-    } else {
-      this.metrics.recordFailure('overall')
-    }
+
+    // Record metrics
+    const metrics = createDualWriteMetricsCollector(this.fastify)
+    metrics.recordOperation('specimen-transport', result)
 
     return result
   }
@@ -115,7 +112,7 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
     // Fetch existing CouchDB document
     let existingCouchDoc: CouchSpecimenTransport | undefined
     try {
-      existingCouchDoc = await this.couch.db.use('specimen_transport').get(id) as CouchSpecimenTransport
+      existingCouchDoc = await this.couch.get(id) as CouchSpecimenTransport
     } catch (error: any) {
       if (error.statusCode !== 404) {
         this.fastify.log.warn(error, `Failed to fetch existing CouchDB specimen transport ${id} for update`)
@@ -149,8 +146,7 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
           result.postgres.error = error as Error
           this.fastify.log.error(error, `PostgreSQL specimen transport update failed after ${retries} retries`)
           if (failOnPostgres) {
-            this.metrics.recordFailure('postgres')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -160,7 +156,7 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
     // Update CouchDB
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const couchUpdateResult = await this.couch.db.use('specimen_transport').insert(updatedCouchDoc)
+        const couchUpdateResult = await this.couch.insert(updatedCouchDoc)
         result.couch.success = true
         result.couch.id = couchUpdateResult.id
         result.couch.rev = couchUpdateResult.rev
@@ -168,7 +164,7 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
       } catch (error: any) {
         if (error.statusCode === 409 && attempt < retries) {
           this.fastify.log.debug(`CouchDB specimen transport update conflict for ${id}, retrying...`)
-          existingCouchDoc = await this.couch.db.use('specimen_transport').get(id) as CouchSpecimenTransport
+          existingCouchDoc = await this.couch.get(id) as CouchSpecimenTransport
           updatedCouchDoc._rev = existingCouchDoc._rev
           await this.delay(retryDelay * Math.pow(2, attempt))
           continue
@@ -177,8 +173,7 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
           result.couch.error = error
           this.fastify.log.error(error, `CouchDB specimen transport update failed after ${retries} retries`)
           if (failOnCouchDB) {
-            this.metrics.recordFailure('couchdb')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -186,11 +181,10 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
     }
 
     result.overall = result.postgres.success && result.couch.success
-    if (result.overall) {
-      this.metrics.recordSuccess()
-    } else {
-      this.metrics.recordFailure('overall')
-    }
+
+    // Record metrics
+    const metrics = createDualWriteMetricsCollector(this.fastify)
+    metrics.recordOperation('specimen-transport', result)
 
     return result
   }
@@ -199,6 +193,10 @@ export class SpecimenTransportDualWriteHelper extends DualWriteHelper {
 export function createSpecimenTransportDualWriteHelper(
   fastify: FastifyInstance
 ): SpecimenTransportDualWriteHelper {
-  return new SpecimenTransportDualWriteHelper(fastify)
+  const db = fastify.couch?.db.use('specimen_transport')
+  if (!db) {
+    throw new Error('CouchDB specimen_transport database not available')
+  }
+  return new SpecimenTransportDualWriteHelper(fastify, db, fastify.prisma)
 }
 

@@ -7,7 +7,10 @@ export interface CouchLabOrder {
   _rev?: string
   type: 'lab_order'
   patientId: string
-  tests: Array<{
+  isPanel?: boolean
+  panelId?: string
+  testCodeLoinc?: string
+  tests?: Array<{
     testCode?: {
       coding?: Array<{
         code: string
@@ -30,13 +33,14 @@ export interface CouchLabOrder {
 
 /**
  * Map CouchDB lab order document to Prisma LabOrder input
- * Note: CouchDB can have multiple tests, Prisma has single testCodeLoinc
- * We'll use the first test code for now
+ * Handles both panel orders and individual test orders
  */
 export function mapCouchToPrismaLabOrder(couchDoc: CouchLabOrder): {
   id: string
   patientId: string
-  testCodeLoinc: string
+  testCodeLoinc: string | null
+  panelId: string | null
+  isPanel: boolean
   status: string
   priority?: string
   orderedAt: Date
@@ -46,22 +50,44 @@ export function mapCouchToPrismaLabOrder(couchDoc: CouchLabOrder): {
   facilityId?: string
   practitionerId?: string
 } {
-  // Extract test code from first test
-  const firstTest = couchDoc.tests?.[0]
-  let testCodeLoinc = 'UNKNOWN' // Default value
-  
-  if (firstTest && firstTest.testCode) {
-    if (typeof firstTest.testCode === 'object' && firstTest.testCode !== null && 'coding' in firstTest.testCode) {
-      const coding = firstTest.testCode.coding
-      if (Array.isArray(coding) && coding.length > 0 && coding[0]?.code) {
-        testCodeLoinc = coding[0].code
-      }
-    } else if (typeof firstTest.testCode === 'string') {
-      testCodeLoinc = firstTest.testCode
+  // Handle panel orders
+  if (couchDoc.isPanel && couchDoc.panelId) {
+    return {
+      id: couchDoc._id || '',
+      patientId: couchDoc.patientId,
+      testCodeLoinc: null,
+      panelId: couchDoc.panelId,
+      isPanel: true,
+      status: couchDoc.status || 'ordered',
+      priority: couchDoc.priority || undefined,
+      orderedAt: couchDoc.orderedOn ? new Date(couchDoc.orderedOn) : new Date(),
+      collectedAt: couchDoc.collectedOn ? new Date(couchDoc.collectedOn) : undefined,
+      receivedAt: couchDoc.receivedOn ? new Date(couchDoc.receivedOn) : undefined,
+      finalizedAt: couchDoc.finalizedOn ? new Date(couchDoc.finalizedOn) : undefined,
+      facilityId: couchDoc.facilityId || undefined,
+      practitionerId: couchDoc.practitionerId || undefined,
     }
   }
 
-  // Ensure we have a valid test code
+  // Handle individual test orders
+  let testCodeLoinc: string | null = couchDoc.testCodeLoinc || null
+  
+  // Fallback: Extract test code from first test if testCodeLoinc not set
+  if (!testCodeLoinc) {
+    const firstTest = couchDoc.tests?.[0]
+    if (firstTest && firstTest.testCode) {
+      if (typeof firstTest.testCode === 'object' && firstTest.testCode !== null && 'coding' in firstTest.testCode) {
+        const coding = firstTest.testCode.coding
+        if (Array.isArray(coding) && coding.length > 0 && coding[0]?.code) {
+          testCodeLoinc = coding[0].code
+        }
+      } else if (typeof firstTest.testCode === 'string') {
+        testCodeLoinc = firstTest.testCode
+      }
+    }
+  }
+
+  // Ensure we have a valid test code for individual orders
   if (!testCodeLoinc || testCodeLoinc === '') {
     testCodeLoinc = 'UNKNOWN'
   }
@@ -70,6 +96,8 @@ export function mapCouchToPrismaLabOrder(couchDoc: CouchLabOrder): {
     id: couchDoc._id || '',
     patientId: couchDoc.patientId,
     testCodeLoinc,
+    panelId: null,
+    isPanel: false,
     status: couchDoc.status || 'ordered',
     priority: couchDoc.priority || undefined,
     orderedAt: couchDoc.orderedOn ? new Date(couchDoc.orderedOn) : new Date(),

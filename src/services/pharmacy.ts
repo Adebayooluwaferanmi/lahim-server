@@ -1,6 +1,5 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { FastifyError } from 'fastify'
 import { ensureCouchDBDatabase, createCouchDBIndexes } from '../lib/db-utils'
 
 /**

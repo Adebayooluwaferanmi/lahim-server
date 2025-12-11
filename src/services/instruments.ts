@@ -3,6 +3,7 @@ import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
 import { createCouchDBIndexes } from '../lib/db-utils'
 import { createInstrumentDualWriteHelper } from '../lib/dual-write-helpers/instrument-dual-write'
+import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
@@ -12,6 +13,7 @@ export default (
   const db = fastify.couchAvailable && fastify.couch 
     ? fastify.couch.db.use('instruments')
     : null
+  const cache = createMetricsCacheHelper(fastify, 'instruments')
   const dualWrite = fastify.prisma ? createInstrumentDualWriteHelper(fastify) : null
 
   // Create indexes on service load
@@ -27,7 +29,7 @@ export default (
     'Instruments'
   )
 
-  // GET /instruments - List instruments
+  // GET /instruments - List instruments (with caching)
   fastify.get('/instruments', async (request, reply) => {
     if (!db) {
       reply.code(503).send({ error: 'CouchDB is not available' })
@@ -35,6 +37,17 @@ export default (
     }
     try {
       const { limit = 50, skip = 0, status } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `instruments:${status || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'instruments.list_cache_hit')
+        return reply.send(cached)
+      }
+
       const selector: any = { type: 'instrument' }
 
       if (status) selector.status = status
@@ -46,15 +59,20 @@ export default (
         sort: [{ name: 'asc' }],
       })
 
+      const response = { instruments: result.docs, count: result.docs.length }
+      
+      // Cache for 5 minutes
+      await cache.set(cacheKey, response, 300)
+
       fastify.log.info({ count: result.docs.length }, 'instruments.list')
-      reply.send({ instruments: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'instruments.list_failed')
       reply.code(500).send({ error: 'Failed to list instruments' })
     }
   })
 
-  // GET /instruments/:id - Get single instrument
+  // GET /instruments/:id - Get single instrument (with caching)
   fastify.get('/instruments/:id', async (request, reply) => {
     if (!db) {
       reply.code(503).send({ error: 'CouchDB is not available' })
@@ -62,12 +80,24 @@ export default (
     }
     try {
       const { id } = request.params as { id: string }
+      
+      // Try cache first
+      const cacheKey = `instruments:${id}`
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'instruments.get_cache_hit')
+        return reply.send(cached)
+      }
+
       const doc = await db.get(id)
 
       if ((doc as any).type !== 'instrument') {
         reply.code(404).send({ error: 'Instrument not found' })
         return
       }
+
+      // Cache for 10 minutes
+      await cache.set(cacheKey, doc, 600)
 
       fastify.log.debug({ id }, 'instruments.get')
       reply.send(doc)
@@ -146,6 +176,9 @@ export default (
         result = { id: insertResult.id, rev: insertResult.rev }
       }
 
+      // Invalidate cache
+      await cache.deletePattern('instruments:*')
+
       fastify.log.info({ id: result.id, name: instrument.name }, 'instruments.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newInstrument })
     } catch (error: unknown) {
@@ -213,6 +246,10 @@ export default (
         const insertResult = await db.insert(updated)
         result = { id: insertResult.id, rev: insertResult.rev }
       }
+
+      // Invalidate cache
+      await cache.deletePattern('instruments:*')
+      await cache.delete(`instruments:${id}`)
 
       fastify.log.info({ id }, 'instruments.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })

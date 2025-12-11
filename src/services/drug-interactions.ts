@@ -1,6 +1,5 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { FastifyError } from 'fastify'
 import { checkExternalInteractions } from './drug-interactions-external'
 
 /**
@@ -114,7 +113,6 @@ function checkInteractions(medications: string[]): DrugInteraction[] {
 export default async (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: (err?: FastifyError) => void,
 ) => {
   // POST /drug-interactions/check - Check for drug interactions
   fastify.post('/drug-interactions/check', async (request, reply) => {
@@ -179,6 +177,5 @@ export default async (
     }
   })
 
-  next()
 }
 

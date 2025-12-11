@@ -1,6 +1,5 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { FastifyError } from 'fastify'
 import PDFDocument from 'pdfkit'
 
 /**
@@ -175,11 +174,15 @@ function generatePDFReport(reportData: ReportData): Promise<Buffer> {
   })
 }
 
-export default (
+export default async (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: (err?: FastifyError) => void,
 ) => {
+  if (!fastify.couchAvailable || !fastify.couch) {
+    fastify.log.warn('PDF Reports service: CouchDB not available - endpoints will return errors')
+    return
+  }
+
   const reportsDb = fastify.couch.db.use('reports')
   const labResultsDb = fastify.couch.db.use('lab_results')
 
@@ -316,7 +319,5 @@ export default (
       reply.code(500).send({ error: 'Failed to serve PDF report' })
     }
   })
-
-  next()
 }
 

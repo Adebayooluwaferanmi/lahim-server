@@ -37,8 +37,19 @@ export class LabOrderDualWriteHelper extends DualWriteHelper {
       try {
         await this.prisma.labOrder.upsert({
           where: { id: prismaData.id },
-          create: prismaData,
-          update: prismaData,
+          create: {
+            ...prismaData,
+            // Handle nullable testCodeLoinc for panel orders
+            testCodeLoinc: prismaData.testCodeLoinc || null,
+            panelId: prismaData.panelId || null,
+            isPanel: prismaData.isPanel || false,
+          },
+          update: {
+            ...prismaData,
+            testCodeLoinc: prismaData.testCodeLoinc || null,
+            panelId: prismaData.panelId || null,
+            isPanel: prismaData.isPanel || false,
+          },
         })
         result.postgres.success = true
         result.postgres.id = prismaData.id

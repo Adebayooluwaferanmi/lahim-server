@@ -5,18 +5,24 @@
 
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { FastifyError } from 'fastify'
 import { eventBus } from '../lib/event-bus'
-import { CacheHelper } from '../lib/db-utils'
-import { createCouchDBIndexes } from '../lib/db-utils'
+import { CacheHelper, ensureCouchDBDatabase, createCouchDBIndexes } from '../lib/db-utils'
 import { createSpecimenTransportDualWriteHelper } from '../lib/dual-write-helpers/specimen-transport-dual-write'
 import { CouchSpecimenTransport } from '../lib/mappers/specimen-transport-mapper'
 
-export default (
+export default async (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: (err?: FastifyError) => void,
 ) => {
+  // Ensure database exists before creating indexes
+  if (fastify.couchAvailable && fastify.couch) {
+    try {
+      await ensureCouchDBDatabase(fastify, 'specimen_transport')
+    } catch (error) {
+      fastify.log.warn({ error }, 'Failed to ensure specimen_transport database, continuing anyway')
+    }
+  }
+
   const db = fastify.couchAvailable && fastify.couch
     ? fastify.couch.db.use('specimen_transport')
     : null
@@ -369,6 +375,5 @@ export default (
     }
   })
 
-  next()
 }
 

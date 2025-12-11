@@ -63,25 +63,109 @@ export default (
         return reply.send(cached)
       }
 
-      const selector: any = { type: 'specimen' }
+      // Try PostgreSQL first (if available), fallback to CouchDB
+      let specimens: any[] = []
+      let total = 0
 
-      if (status) selector.status = status
-      if (patientId) selector.patientId = patientId
-      if (orderId) selector.orderId = orderId
+      if (fastify.prisma) {
+        try {
+          const where: any = {}
+          if (orderId) where.orderId = orderId
+          // Note: status and patientId filters would need to be done via order relation
+          // For now, we'll filter by orderId primarily
 
-      const result = await db.find({
-        selector,
-        limit: parseInt(limit, 10),
-        skip: parseInt(skip, 10),
-        sort: [{ collectedOn: 'desc' }], // Sort by collectedOn desc only (CouchDB doesn't support mixed directions)
-      })
+          const [labSpecimens, count] = await Promise.all([
+            fastify.prisma.labSpecimen.findMany({
+              where,
+              take: parseInt(limit, 10),
+              skip: parseInt(skip, 10),
+              orderBy: { collectedAt: 'desc' },
+              include: {
+                order: {
+                  include: {
+                    patient: true,
+                  },
+                },
+                results: true,
+                transports: true,
+              },
+            }),
+            fastify.prisma.labSpecimen.count({ where }),
+          ])
 
-      const response = { specimens: result.docs, count: result.docs.length }
+          // Map Prisma results to CouchDB-like format for compatibility
+          specimens = labSpecimens.map((specimen: any) => {
+            const couchSpecimen: any = {
+              _id: specimen.id,
+              _rev: '1-xxx', // Placeholder for CouchDB revision
+              type: 'specimen',
+              orderId: specimen.orderId,
+              specimenTypeCode: specimen.specimenTypeCode,
+              specimenType: {
+                coding: [{ code: specimen.specimenTypeCode }],
+              },
+              collectedOn: specimen.collectedAt?.toISOString(),
+              container: specimen.container,
+              accessionNo: specimen.accessionNo,
+              storageLocation: specimen.storageLocation,
+              createdAt: specimen.createdAt?.toISOString(),
+              updatedAt: specimen.updatedAt?.toISOString(),
+            }
+
+            // Add patient info from order if available
+            if (specimen.order?.patient) {
+              couchSpecimen.patientId = specimen.order.patient.patientId
+              couchSpecimen.patientName = `${specimen.order.patient.firstName || ''} ${specimen.order.patient.lastName || ''}`.trim()
+            }
+
+            // Add order status if available
+            if (specimen.order) {
+              couchSpecimen.status = specimen.order.status || 'collected'
+            }
+
+            return couchSpecimen
+          })
+
+          // Apply additional filters if needed (patientId via order relation)
+          if (patientId) {
+            specimens = specimens.filter((s: any) => s.patientId === patientId)
+          }
+          if (status) {
+            specimens = specimens.filter((s: any) => s.status === status)
+          }
+
+          total = specimens.length
+        } catch (pgError) {
+          fastify.log.warn({ error: pgError }, 'PostgreSQL Specimens query failed, falling back to CouchDB')
+          // Fall through to CouchDB query
+        }
+      }
+
+      // Fallback to CouchDB if PostgreSQL not available or failed
+      if (specimens.length === 0 && total === 0) {
+        const selector: any = { type: 'specimen' }
+
+        if (status) selector.status = status
+        if (patientId) selector.patientId = patientId
+        if (orderId) selector.orderId = orderId
+
+        const result = await db.find({
+          selector,
+          limit: parseInt(limit, 10),
+          skip: parseInt(skip, 10),
+          sort: [{ collectedOn: 'desc' }],
+        })
+
+        specimens = result.docs
+        total = result.docs.length
+      }
+
+      const response = { specimens, count: specimens.length, total, limit: parseInt(limit, 10), skip: parseInt(skip, 10) }
       
       // Cache for 5 minutes
       await cache.set(cacheKey, response, 300)
 
-      fastify.log.info({ count: result.docs.length }, 'specimens.list')
+      fastify.log.info({ count: specimens.length }, 'specimens.list')
       reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'specimens.list_failed')
@@ -97,12 +181,26 @@ export default (
     }
     try {
       const { id } = request.params as { id: string }
+      
+      // Create cache key
+      const cacheKey = `specimen:${id}`
+      
+      // Try to get from cache
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'specimens.get_cache_hit')
+        return reply.send(cached)
+      }
+
       const doc = await db.get(id)
 
       if ((doc as any).type !== 'specimen') {
         reply.code(404).send({ error: 'Specimen not found' })
         return
       }
+
+      // Cache for 5 minutes
+      await cache.set(cacheKey, doc, 300)
 
       fastify.log.debug({ id }, 'specimens.get')
       reply.send(doc)

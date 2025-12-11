@@ -46,70 +46,167 @@ export default (
         return reply.send(cached)
       }
 
-      const selector: any = { type: 'lab_order' }
+      // Try PostgreSQL first (if available), fallback to CouchDB
+      let orders: any[] = []
+      let total = 0
 
-      if (status) selector.status = status
-      if (patientId) selector.patientId = patientId
+      if (fastify.prisma) {
+        try {
+          const where: any = {}
+          if (status) where.status = status
+          if (patientId) where.patientId = patientId
 
-      let result
-      try {
-        result = await db.find({
-          selector,
-          limit: parseInt(limit, 10),
-          skip: parseInt(skip, 10),
-          sort: [{ orderedOn: 'desc' }],
-        })
-      } catch (sortError: any) {
-        // If sort fails due to missing index, try to create it and retry
-        const errorMessage = sortError?.message || String(sortError)
-        if (errorMessage.includes('No index exists for this sort')) {
-          fastify.log.warn('Index missing for sort, creating index and retrying...')
-          try {
-            // Try to create the index
-            await createCouchDBIndexes(
-              fastify,
-              'lab_orders',
-              [
-                { index: { fields: ['type', 'orderedOn'] }, name: 'type-orderedOn-index' },
-                { index: { fields: ['type', 'status', 'orderedOn'] }, name: 'type-status-orderedOn-index' },
-              ],
-              'Lab Orders'
-            )
-            // Retry the query
-            result = await db.find({
-              selector,
-              limit: parseInt(limit, 10),
+          const [labOrders, count] = await Promise.all([
+            fastify.prisma.labOrder.findMany({
+              where,
+              take: parseInt(limit, 10),
               skip: parseInt(skip, 10),
-              sort: [{ orderedOn: 'desc' }],
-            })
-          } catch (retryError) {
-            // If retry still fails, try without sort
-            fastify.log.warn('Retry with index failed, trying without sort...')
-            result = await db.find({
-              selector,
-              limit: parseInt(limit, 10),
-              skip: parseInt(skip, 10),
-            })
-            // Sort in memory as fallback
-            if (result.docs && Array.isArray(result.docs)) {
-              result.docs.sort((a: any, b: any) => {
-                const aDate = a.orderedOn ? new Date(a.orderedOn).getTime() : 0
-                const bDate = b.orderedOn ? new Date(b.orderedOn).getTime() : 0
-                return bDate - aDate
-              })
+              orderBy: { orderedAt: 'desc' },
+              include: {
+                patient: true,
+                practitioner: true,
+                testCatalog: true,
+                testPanel: true,
+                specimens: true,
+                results: true,
+              },
+            }),
+            fastify.prisma.labOrder.count({ where }),
+          ])
+
+          // Map Prisma results to CouchDB-like format for compatibility
+          orders = labOrders.map((order: any) => {
+            const couchOrder: any = {
+              _id: order.id,
+              _rev: '1-xxx', // Placeholder for CouchDB revision
+              type: 'lab_order',
+              patientId: order.patientId,
+              status: order.status,
+              priority: order.priority,
+              orderedOn: order.orderedAt?.toISOString(),
+              collectedOn: order.collectedAt?.toISOString(),
+              receivedOn: order.receivedAt?.toISOString(),
+              finalizedOn: order.finalizedAt?.toISOString(),
+              facilityId: order.facilityId,
+              practitionerId: order.practitionerId,
+              createdAt: order.createdAt?.toISOString(),
+              updatedAt: order.updatedAt?.toISOString(),
             }
-          }
-        } else {
-          throw sortError
+
+            // Handle panel vs individual test orders
+            if (order.isPanel && order.panelId) {
+              couchOrder.isPanel = true
+              couchOrder.panelId = order.panelId
+              couchOrder.testCodeLoinc = undefined
+              if (order.testPanel) {
+                couchOrder.tests = order.testPanel.parameters?.map((param: any) => ({
+                  testCode: {
+                    coding: [{ code: param.parameterCode, display: param.parameterName }],
+                  },
+                  testName: param.parameterName,
+                })) || []
+              }
+            } else {
+              couchOrder.isPanel = false
+              couchOrder.testCodeLoinc = order.testCodeLoinc
+              if (order.testCatalog) {
+                couchOrder.tests = [{
+                  testCode: {
+                    coding: [{ code: order.testCatalog.code, display: order.testCatalog.name }],
+                  },
+                  testName: order.testCatalog.name,
+                }]
+              }
+            }
+
+            // Add patient info if available
+            if (order.patient) {
+              couchOrder.patientName = `${order.patient.firstName || ''} ${order.patient.lastName || ''}`.trim()
+            }
+
+            // Add practitioner info
+            if (order.practitioner) {
+              couchOrder.practitionerName = `${order.practitioner.firstName || ''} ${order.practitioner.lastName || ''}`.trim()
+            }
+
+            return couchOrder
+          })
+          total = count
+        } catch (pgError) {
+          fastify.log.warn({ error: pgError }, 'PostgreSQL Lab Orders query failed, falling back to CouchDB')
+          // Fall through to CouchDB query
         }
       }
 
-      const response = { orders: result.docs, count: result.docs.length }
+      // Fallback to CouchDB if PostgreSQL not available or failed
+      if (orders.length === 0 && total === 0) {
+        const selector: any = { type: 'lab_order' }
+
+        if (status) selector.status = status
+        if (patientId) selector.patientId = patientId
+
+        let result
+        try {
+          result = await db.find({
+            selector,
+            limit: parseInt(limit, 10),
+            skip: parseInt(skip, 10),
+            sort: [{ orderedOn: 'desc' }],
+          })
+        } catch (sortError: any) {
+          // If sort fails due to missing index, try to create it and retry
+          const errorMessage = sortError?.message || String(sortError)
+          if (errorMessage.includes('No index exists for this sort')) {
+            fastify.log.warn('Index missing for sort, creating index and retrying...')
+            try {
+              // Try to create the index
+              await createCouchDBIndexes(
+                fastify,
+                'lab_orders',
+                [
+                  { index: { fields: ['type', 'orderedOn'] }, name: 'type-orderedOn-index' },
+                  { index: { fields: ['type', 'status', 'orderedOn'] }, name: 'type-status-orderedOn-index' },
+                ],
+                'Lab Orders'
+              )
+              // Retry the query
+              result = await db.find({
+                selector,
+                limit: parseInt(limit, 10),
+                skip: parseInt(skip, 10),
+                sort: [{ orderedOn: 'desc' }],
+              })
+            } catch (retryError) {
+              // If retry still fails, try without sort
+              fastify.log.warn('Retry with index failed, trying without sort...')
+              result = await db.find({
+                selector,
+                limit: parseInt(limit, 10),
+                skip: parseInt(skip, 10),
+              })
+              // Sort in memory as fallback
+              if (result.docs && Array.isArray(result.docs)) {
+                result.docs.sort((a: any, b: any) => {
+                  const aDate = a.orderedOn ? new Date(a.orderedOn).getTime() : 0
+                  const bDate = b.orderedOn ? new Date(b.orderedOn).getTime() : 0
+                  return bDate - aDate
+                })
+              }
+            }
+          } else {
+            throw sortError
+          }
+        }
+        orders = result.docs
+        total = result.docs.length
+      }
+
+      const response = { orders, count: orders.length, total, limit: parseInt(limit, 10), skip: parseInt(skip, 10) }
       
       // Cache for 5 minutes
       await cache.set(cacheKey, response, 300)
 
-      fastify.log.info({ count: result.docs.length }, 'lab_orders.list')
+      fastify.log.info({ count: orders.length }, 'lab_orders.list')
       reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'lab_orders.list_failed')
@@ -121,12 +218,26 @@ export default (
   fastify.get('/lab-orders/:id', async (request, reply) => {
     try {
       const { id } = request.params as { id: string }
+      
+      // Create cache key
+      const cacheKey = `lab-order:${id}`
+      
+      // Try to get from cache
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'lab_orders.get_cache_hit')
+        return reply.send(cached)
+      }
+
       const doc = await db.get(id)
 
       if ((doc as any).type !== 'lab_order') {
         reply.code(404).send({ error: 'Lab order not found' })
         return
       }
+
+      // Cache for 5 minutes
+      await cache.set(cacheKey, doc, 300)
 
       fastify.log.debug({ id }, 'lab_orders.get')
       reply.send(doc)
@@ -145,12 +256,75 @@ export default (
     try {
       const order = request.body as any
 
-      if (!order.patientId || !order.tests || order.tests.length === 0) {
-        reply.code(400).send({ error: 'Patient ID and at least one test are required' })
+      // Validate panel or individual test order
+      if (!order.patientId) {
+        reply.code(400).send({ error: 'Patient ID is required' })
         return
       }
 
+      if (order.isPanel) {
+        if (!order.panelId) {
+          reply.code(400).send({ error: 'Panel ID is required for panel orders' })
+          return
+        }
+      } else {
+        if (!order.testCodeLoinc && (!order.tests || order.tests.length === 0)) {
+          reply.code(400).send({ error: 'Test code or tests array is required for individual test orders' })
+          return
+        }
+      }
+
       const now = new Date().toISOString()
+      
+      // If panel order, expand to individual parameters
+      let panelParameters: any[] = []
+      if (order.isPanel && order.panelId) {
+        try {
+          // Get panel from CouchDB or PostgreSQL
+          const panelsDb = fastify.couchAvailable && fastify.couch 
+            ? fastify.couch.db.use('test_panels')
+            : null
+
+          if (panelsDb) {
+            const panelDoc = await panelsDb.get(order.panelId)
+            if ((panelDoc as any).type === 'testPanel') {
+              panelParameters = (panelDoc as any).parameters || []
+            }
+          } else if (fastify.prisma) {
+            const panel = await fastify.prisma.testPanel.findUnique({
+              where: { id: order.panelId },
+              include: { parameters: { orderBy: { sequence: 'asc' } } },
+            })
+            if (panel) {
+              panelParameters = panel.parameters.map((p: any) => ({
+                parameterCode: p.parameterCode,
+                parameterName: p.parameterName,
+                unit: p.unit,
+                refRangeLow: p.refRangeLow,
+                refRangeHigh: p.refRangeHigh,
+                criticalLow: p.criticalLow,
+                criticalHigh: p.criticalHigh,
+              }))
+            }
+          }
+
+          if (panelParameters.length === 0) {
+            reply.code(404).send({ error: 'Panel not found or has no parameters' })
+            return
+          }
+
+          // Expand panel to individual tests for CouchDB structure
+          order.tests = panelParameters.map((param: any) => ({
+            testCode: param.parameterCode,
+            testName: param.parameterName,
+          }))
+        } catch (panelError) {
+          fastify.log.error({ error: panelError }, 'Failed to fetch panel')
+          reply.code(404).send({ error: 'Panel not found' })
+          return
+        }
+      }
+
       const newOrder = {
         ...order,
         type: 'lab_order' as const,
@@ -189,6 +363,56 @@ export default (
             result = {
               id: dualWriteResult.postgres.id || dualWriteResult.couch.id || newOrder._id,
               rev: dualWriteResult.couch.rev || '',
+            }
+
+            // If panel order, create result entries for each parameter
+            if (order.isPanel && panelParameters.length > 0 && fastify.prisma) {
+              try {
+                const orderId = result.id
+                const resultsDb = fastify.couchAvailable && fastify.couch 
+                  ? fastify.couch.db.use('lab_results')
+                  : null
+
+                for (const param of panelParameters) {
+                  // Create result in PostgreSQL
+                  await fastify.prisma.labResult.create({
+                    data: {
+                      orderId,
+                      analyteCodeLoinc: param.parameterCode,
+                      resultType: 'numeric', // Default, can be updated later
+                      refRangeLow: param.refRangeLow,
+                      refRangeHigh: param.refRangeHigh,
+                    },
+                  })
+
+                  // Create result in CouchDB if available
+                  if (resultsDb) {
+                    const resultDoc = {
+                      _id: `lab_result_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                      type: 'lab_result',
+                      orderId,
+                      analyteCodeLoinc: param.parameterCode,
+                      parameterName: param.parameterName,
+                      resultType: 'numeric',
+                      refRangeLow: param.refRangeLow,
+                      refRangeHigh: param.refRangeHigh,
+                      criticalLow: param.criticalLow,
+                      criticalHigh: param.criticalHigh,
+                      unit: param.unit,
+                      status: 'pending',
+                      createdAt: now,
+                      updatedAt: now,
+                    }
+                    resultsDb.insert(resultDoc).catch((err) => {
+                      fastify.log.warn({ error: err }, 'Failed to create result in CouchDB')
+                    })
+                  }
+                }
+                fastify.log.info({ orderId, parameterCount: panelParameters.length }, 'lab_orders.panel_expanded')
+              } catch (resultError) {
+                fastify.log.error({ error: resultError }, 'Failed to create panel result entries')
+                // Don't fail the order creation if result creation fails
+              }
             }
           }
         } catch (dualWriteError) {

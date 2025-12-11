@@ -55,10 +55,16 @@ async function populateTestCatalog() {
 
     // Combine all unique test codes
     const allCodes = new Set<string>()
-    labOrderCodes.forEach((o) => allCodes.add(o.testCodeLoinc))
+    labOrderCodes.forEach((o) => {
+      if (o.testCodeLoinc) allCodes.add(o.testCodeLoinc)
+    })
     labResultCodes.forEach((r) => allCodes.add(r.analyteCodeLoinc))
-    qcResultCodes.forEach((q) => allCodes.add(q.testCodeLoinc))
-    worklistItemCodes.forEach((w) => allCodes.add(w.testCodeLoinc))
+    qcResultCodes.forEach((q) => {
+      if (q.testCodeLoinc) allCodes.add(q.testCodeLoinc)
+    })
+    worklistItemCodes.forEach((w) => {
+      if (w.testCodeLoinc) allCodes.add(w.testCodeLoinc)
+    })
 
     console.log(`\nTotal unique test codes found: ${allCodes.size}`)
     console.log('')

@@ -385,7 +385,7 @@ export default async (
             verifiedAt: new Date().toISOString(),
             result: verification,
             createdAt: new Date().toISOString(),
-          })
+          } as any)
         } catch (dbError) {
           fastify.log.warn(dbError, 'Failed to store verification record')
         }
@@ -462,7 +462,7 @@ export default async (
             rejectionReason: claimResponse.rejectionReason,
             submittedAt: new Date().toISOString(),
             createdAt: new Date().toISOString(),
-          })
+          } as any)
         } catch (dbError) {
           fastify.log.warn(dbError, 'Failed to store claim record')
         }
@@ -523,4 +523,5 @@ export default async (
     }
   })
 }
+
 

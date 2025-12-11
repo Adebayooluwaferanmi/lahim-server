@@ -1,12 +1,10 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { FastifyError } from 'fastify'
 import { ensureCouchDBDatabase, createCouchDBIndexes } from '../lib/db-utils'
 
 export default async (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: (err?: FastifyError) => void,
 ) => {
   // Ensure database exists
   if (fastify.couchAvailable && fastify.couch) {
@@ -16,7 +14,6 @@ export default async (
   // Only create database reference if CouchDB is available
   if (!fastify.couchAvailable || !fastify.couch) {
     fastify.log.warn('Visits service: CouchDB not available - endpoints will return errors')
-    next()
     return
   }
 
@@ -330,6 +327,5 @@ export default async (
     }
   })
 
-  next()
 }
 

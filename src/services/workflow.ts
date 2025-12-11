@@ -7,7 +7,7 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
-import { eventBus, EventType } from '../lib/event-bus'
+import { eventBus } from '../lib/event-bus'
 import { createCouchDBIndexes } from '../lib/db-utils'
 import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
 
@@ -233,7 +233,7 @@ export default (
   })
 
   // GET /workflow/dashboard - Get workflow dashboard data
-  fastify.get('/workflow/dashboard', async (request, reply) => {
+  fastify.get('/workflow/dashboard', async (_request, reply) => {
     if (!labOrdersDb) {
       reply.code(503).send({ error: 'CouchDB is not available' })
       return
@@ -399,7 +399,7 @@ export default (
   })
 
   // Helper function to determine current stage
-  function getCurrentStage(status: string, timeline: any[]): string {
+  function getCurrentStage(status: string, _timeline: any[]): string {
     if (['requested', 'approved', 'collected', 'received'].includes(status)) {
       return 'pre-analytical'
     } else if (status === 'in-progress') {
@@ -429,7 +429,7 @@ export default (
       return
     }
     try {
-      const { orderId, event, data } = request.body as any
+      const { orderId, event, data: _data } = request.body as any
 
       if (!orderId || !event) {
         reply.code(400).send({ error: 'Order ID and event are required' })

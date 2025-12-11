@@ -14,8 +14,8 @@ import {
 import { createDualWriteMetricsCollector } from '../monitoring/dual-write-metrics'
 
 export class EquipmentDualWriteHelper extends DualWriteHelper {
-  constructor(fastify: FastifyInstance) {
-    super(fastify, 'equipment', createDualWriteMetricsCollector(fastify, 'equipment'))
+  constructor(fastify: FastifyInstance, couch: any, prisma: any) {
+    super(fastify, couch, prisma)
   }
 
   async writeEquipment(
@@ -53,8 +53,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
           result.postgres.error = error as Error
           this.fastify.log.error(error, `PostgreSQL equipment write failed after ${retries} retries`)
           if (failOnPostgres) {
-            this.metrics.recordFailure('postgres')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -64,10 +63,10 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
     // Write to CouchDB
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        await this.couch.db.use('equipment').insert(couchDoc)
+        const insertResult = await this.couch.insert(couchDoc)
         result.couch.success = true
-        result.couch.id = couchDoc._id
-        result.couch.rev = couchDoc._rev
+        result.couch.id = insertResult.id
+        result.couch.rev = insertResult.rev
         break
       } catch (error: any) {
         if (error.statusCode === 409) {
@@ -78,8 +77,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
           result.couch.error = error
           this.fastify.log.error(error, `CouchDB equipment write failed after ${retries} retries`)
           if (failOnCouchDB) {
-            this.metrics.recordFailure('couchdb')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -87,11 +85,10 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
     }
 
     result.overall = result.postgres.success && result.couch.success
-    if (result.overall) {
-      this.metrics.recordSuccess()
-    } else {
-      this.metrics.recordFailure('overall')
-    }
+
+    // Record metrics
+    const metrics = createDualWriteMetricsCollector(this.fastify)
+    metrics.recordOperation('equipment', result)
 
     return result
   }
@@ -117,7 +114,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
     // Fetch existing CouchDB document
     let existingCouchDoc: CouchEquipment | undefined
     try {
-      existingCouchDoc = await this.couch.db.use('equipment').get(id) as CouchEquipment
+      existingCouchDoc = await this.couch.get(id) as CouchEquipment
     } catch (error: any) {
       if (error.statusCode !== 404) {
         this.fastify.log.warn(error, `Failed to fetch existing CouchDB equipment ${id} for update`)
@@ -151,8 +148,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
           result.postgres.error = error as Error
           this.fastify.log.error(error, `PostgreSQL equipment update failed after ${retries} retries`)
           if (failOnPostgres) {
-            this.metrics.recordFailure('postgres')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -162,7 +158,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
     // Update CouchDB
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const couchUpdateResult = await this.couch.db.use('equipment').insert(updatedCouchDoc)
+        const couchUpdateResult = await this.couch.insert(updatedCouchDoc)
         result.couch.success = true
         result.couch.id = couchUpdateResult.id
         result.couch.rev = couchUpdateResult.rev
@@ -170,7 +166,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
       } catch (error: any) {
         if (error.statusCode === 409 && attempt < retries) {
           this.fastify.log.debug(`CouchDB equipment update conflict for ${id}, retrying...`)
-          existingCouchDoc = await this.couch.db.use('equipment').get(id) as CouchEquipment
+          existingCouchDoc = await this.couch.get(id) as CouchEquipment
           updatedCouchDoc._rev = existingCouchDoc._rev
           await this.delay(retryDelay * Math.pow(2, attempt))
           continue
@@ -179,8 +175,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
           result.couch.error = error
           this.fastify.log.error(error, `CouchDB equipment update failed after ${retries} retries`)
           if (failOnCouchDB) {
-            this.metrics.recordFailure('couchdb')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -188,11 +183,10 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
     }
 
     result.overall = result.postgres.success && result.couch.success
-    if (result.overall) {
-      this.metrics.recordSuccess()
-    } else {
-      this.metrics.recordFailure('overall')
-    }
+
+    // Record metrics
+    const metrics = createDualWriteMetricsCollector(this.fastify)
+    metrics.recordOperation('equipment', result)
 
     return result
   }
@@ -232,8 +226,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
           result.postgres.error = error as Error
           this.fastify.log.error(error, `PostgreSQL equipment maintenance write failed after ${retries} retries`)
           if (failOnPostgres) {
-            this.metrics.recordFailure('postgres')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -243,10 +236,10 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
     // Write to CouchDB
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        await this.couch.db.use('equipment').insert(couchDoc)
+        const insertResult = await this.couch.insert(couchDoc)
         result.couch.success = true
-        result.couch.id = couchDoc._id
-        result.couch.rev = couchDoc._rev
+        result.couch.id = insertResult.id
+        result.couch.rev = insertResult.rev
         break
       } catch (error: any) {
         if (error.statusCode === 409) {
@@ -257,8 +250,7 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
           result.couch.error = error
           this.fastify.log.error(error, `CouchDB equipment maintenance write failed after ${retries} retries`)
           if (failOnCouchDB) {
-            this.metrics.recordFailure('couchdb')
-            throw error
+            return result
           }
         }
         await this.delay(retryDelay * Math.pow(2, attempt))
@@ -266,11 +258,10 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
     }
 
     result.overall = result.postgres.success && result.couch.success
-    if (result.overall) {
-      this.metrics.recordSuccess()
-    } else {
-      this.metrics.recordFailure('overall')
-    }
+
+    // Record metrics
+    const metrics = createDualWriteMetricsCollector(this.fastify)
+    metrics.recordOperation('equipment-maintenance', result)
 
     return result
   }
@@ -279,6 +270,10 @@ export class EquipmentDualWriteHelper extends DualWriteHelper {
 export function createEquipmentDualWriteHelper(
   fastify: FastifyInstance
 ): EquipmentDualWriteHelper {
-  return new EquipmentDualWriteHelper(fastify)
+  const db = fastify.couch?.db.use('equipment')
+  if (!db) {
+    throw new Error('CouchDB equipment database not available')
+  }
+  return new EquipmentDualWriteHelper(fastify, db, fastify.prisma)
 }
 

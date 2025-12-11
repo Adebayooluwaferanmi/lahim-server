@@ -1,7 +1,7 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
-import { eventBus, EventType } from '../lib/event-bus'
+import { eventBus } from '../lib/event-bus'
 import { CacheHelper } from '../lib/db-utils'
 import { createCouchDBIndexes } from '../lib/db-utils'
 

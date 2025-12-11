@@ -1,7 +1,7 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
-import { FastifyError } from 'fastify'
 import { ensureCouchDBDatabase, createCouchDBIndexes } from '../lib/db-utils'
+import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
 import { randomUUID } from 'crypto'
 
 interface DeliveryRequest {
@@ -23,7 +23,6 @@ interface Report {
 export default async (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
-  next: (err?: FastifyError) => void,
 ) => {
   // Ensure database exists
   if (fastify.couchAvailable && fastify.couch) {
@@ -33,11 +32,11 @@ export default async (
   // Only create database reference if CouchDB is available
   if (!fastify.couchAvailable || !fastify.couch) {
     fastify.log.warn('Reports service: CouchDB not available - endpoints will return errors')
-    next()
     return
   }
 
   const db = fastify.couch.db.use('reports')
+  const cache = createMetricsCacheHelper(fastify, 'reports')
 
   // Create indexes on service load
   createCouchDBIndexes(
@@ -82,10 +81,21 @@ export default async (
     return `${prefix}000001`
   }
 
-  // GET /reports - List reports
+  // GET /reports - List reports (with caching)
   fastify.get('/reports', async (request, reply) => {
     try {
       const { limit = 50, skip = 0, patientId, status, reportType, startDate, endDate } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `reports:${patientId || 'all'}:${status || 'all'}:${reportType || 'all'}:${startDate || 'all'}:${endDate || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'reports.list_cache_hit')
+        return reply.send(cached)
+      }
+
       const selector: any = { type: 'report' }
 
       if (patientId) selector.patientId = patientId
@@ -104,24 +114,41 @@ export default async (
         sort: [{ generatedOn: 'desc' }],
       })
 
+      const response = { reports: result.docs, count: result.docs.length }
+      
+      // Cache for 5 minutes (reports don't change frequently)
+      await cache.set(cacheKey, response, 300)
+
       fastify.log.info({ count: result.docs.length }, 'reports.list')
-      reply.send({ reports: result.docs, count: result.docs.length })
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'reports.list_failed')
       reply.code(500).send({ error: 'Failed to list reports' })
     }
   })
 
-  // GET /reports/:id - Get single report
+  // GET /reports/:id - Get single report (with caching)
   fastify.get('/reports/:id', async (request, reply) => {
     try {
       const { id } = request.params as { id: string }
+      
+      // Try cache first
+      const cacheKey = `reports:${id}`
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'reports.get_cache_hit')
+        return reply.send(cached)
+      }
+
       const doc = await db.get(id)
 
       if ((doc as any).type !== 'report') {
         reply.code(404).send({ error: 'Report not found' })
         return
       }
+
+      // Cache for 10 minutes (reports are read-only after generation)
+      await cache.set(cacheKey, doc, 600)
 
       fastify.log.debug({ id }, 'reports.get')
       reply.send(doc)
@@ -185,6 +212,9 @@ export default async (
         patientId: reportRequest.patientId,
       })
 
+      // Invalidate cache
+      await cache.deletePattern('reports:*')
+
       fastify.log.info({ id: result.id, reportNumber, reportType: reportRequest.reportType }, 'reports.generated')
       reply.code(201).send({ id: result.id, rev: result.rev })
     } catch (error: unknown) {
@@ -212,6 +242,11 @@ export default async (
       }
 
       const result = await db.insert(updated)
+      
+      // Invalidate cache
+      await cache.deletePattern('reports:*')
+      await cache.delete(`reports:${id}`)
+
       fastify.log.info({ id }, 'reports.updated')
       reply.send({ id: result.id, rev: result.rev })
     } catch (error: unknown) {
@@ -236,6 +271,10 @@ export default async (
       }
 
       await db.destroy(id, (doc as any)._rev)
+      
+      // Invalidate cache
+      await cache.deletePattern('reports:*')
+      await cache.delete(`reports:${id}`)
       fastify.log.info({ id }, 'reports.deleted')
       reply.send({ success: true })
     } catch (error: unknown) {
@@ -747,6 +786,5 @@ export default async (
     }
   })
 
-  next()
 }
 

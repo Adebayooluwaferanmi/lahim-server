@@ -59,7 +59,7 @@ export class TestCatalogDualWriteHelper extends DualWriteHelper {
     // Write to CouchDB (secondary, for offline sync)
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const insertResult = await this.couchDb.insert(couchDoc)
+        const insertResult = await this.couch.insert(couchDoc)
         result.couch.success = true
         result.couch.id = insertResult.id
         result.couch.rev = insertResult.rev
@@ -81,11 +81,7 @@ export class TestCatalogDualWriteHelper extends DualWriteHelper {
 
     // Record metrics
     const metrics = createDualWriteMetricsCollector(this.fastify)
-    if (result.overall) {
-      metrics.recordSuccess('test-catalog', 'write')
-    } else {
-      metrics.recordFailure('test-catalog', 'write')
-    }
+    metrics.recordOperation('test-catalog', result)
 
     return result
   }
@@ -101,7 +97,7 @@ export class TestCatalogDualWriteHelper extends DualWriteHelper {
     // Get existing document from CouchDB
     let existing: CouchTestCatalog
     try {
-      existing = await this.couchDb.get(id) as CouchTestCatalog
+      existing = await this.couch.get(id) as CouchTestCatalog
     } catch (error) {
       return {
         couch: { success: false, error: error as Error },
@@ -122,7 +118,7 @@ export class TestCatalogDualWriteHelper extends DualWriteHelper {
    */
   async deleteTestCatalog(
     id: string,
-    rev: string,
+    _rev: string, // Unused but kept for API consistency
     options: DualWriteOptions = {}
   ): Promise<DualWriteResult> {
     // Soft delete: set active=false instead of actually deleting
@@ -139,6 +135,6 @@ export function createTestCatalogDualWriteHelper(fastify: FastifyInstance): Test
   if (!db) {
     throw new Error('CouchDB test_catalog database not available')
   }
-  return new TestCatalogDualWriteHelper(fastify, fastify.prisma, db)
+  return new TestCatalogDualWriteHelper(fastify, db, fastify.prisma)
 }
 

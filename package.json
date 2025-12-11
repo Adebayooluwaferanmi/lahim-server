@@ -5,7 +5,7 @@
   "main": "dist",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HospitalRun/hospitalrun-server.git"
+    "url": "https://github.com/Adebayooluwaferanmi/hospitalrun-server.git"
   },
   "scripts": {
     "ddoc": "node bin/ddoc",

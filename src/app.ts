@@ -69,7 +69,7 @@ function LaHIM(fastify: FastifyInstance, opts: any, next: (err?: FastifyError) =
   fastify.register(AutoLoad, {
     dir: join(__dirname, 'services'),
     options: { ...opts },
-    ignorePattern: /^(dual-write-service|event-handlers|lab-orders-modern)\.(js|ts)$/,
+    ignorePattern: /^(dual-write-service|event-handlers|lab-orders-modern|drug-interactions-external)\.(js|ts)$/,
   } as any)
 
   next()

@@ -10,13 +10,6 @@
 
 import { DrugInteraction } from './drug-interactions'
 
-interface RxNormInteraction {
-  severity: string
-  description: string
-  clinicalSignificance?: string
-  recommendation?: string
-}
-
 interface DrugBankInteraction {
   severity: 'major' | 'moderate' | 'minor'
   description: string
@@ -56,7 +49,7 @@ async function getRxNormConceptId(medicationName: string): Promise<string | null
       return null
     }
 
-    const data = await response.json()
+    const data = await response.json() as any
     if (data.drugGroup?.conceptGroup?.[0]?.conceptProperties?.[0]?.rxcui) {
       return data.drugGroup.conceptGroup[0].conceptProperties[0].rxcui
     }
@@ -73,7 +66,7 @@ async function getRxNormConceptId(medicationName: string): Promise<string | null
  * Note: RxNorm doesn't directly provide interaction data, but we can use it
  * to normalize drug names and then check against other sources
  */
-async function checkRxNormInteractions(medications: string[]): Promise<DrugInteraction[]> {
+async function checkRxNormInteractions(_medications: string[]): Promise<DrugInteraction[]> {
   // RxNorm is primarily for drug name normalization
   // For actual interactions, we'd need to use DrugBank or other sources
   // This is a placeholder for future integration
@@ -186,7 +179,7 @@ export async function getRxNormMedicationInfo(medicationName: string): Promise<{
       return { rxcui }
     }
 
-    const data = await response.json()
+    const data = await response.json() as any
     return {
       rxcui,
       name: data.properties?.name,
@@ -197,4 +190,5 @@ export async function getRxNormMedicationInfo(medicationName: string): Promise<{
     return null
   }
 }
+
 

@@ -59,7 +59,7 @@ export class PatientDualWriteHelper extends DualWriteHelper {
     // Write to CouchDB (secondary, for offline sync)
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const insertResult = await this.couchDb.insert(couchDoc)
+        const insertResult = await this.couch.insert(couchDoc)
         result.couch.success = true
         result.couch.id = insertResult.id
         result.couch.rev = insertResult.rev
@@ -81,11 +81,7 @@ export class PatientDualWriteHelper extends DualWriteHelper {
 
     // Record metrics
     const metrics = createDualWriteMetricsCollector(this.fastify)
-    if (result.overall) {
-      metrics.recordSuccess('patient', 'write')
-    } else {
-      metrics.recordFailure('patient', 'write')
-    }
+    metrics.recordOperation('patient', result)
 
     return result
   }
@@ -102,7 +98,7 @@ export class PatientDualWriteHelper extends DualWriteHelper {
     let existing: CouchPatient
     try {
       // Try to find by patientId first
-      const findResult = await this.couchDb.find({
+      const findResult = await this.couch.find({
         selector: {
           $or: [
             { 'data.friendlyId': patientId },
@@ -143,6 +139,6 @@ export function createPatientDualWriteHelper(fastify: FastifyInstance): PatientD
   if (!db) {
     throw new Error('CouchDB patients database not available')
   }
-  return new PatientDualWriteHelper(fastify, fastify.prisma, db)
+  return new PatientDualWriteHelper(fastify, db, fastify.prisma)
 }
 

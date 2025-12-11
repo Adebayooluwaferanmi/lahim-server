@@ -59,7 +59,7 @@ export class InstrumentDualWriteHelper extends DualWriteHelper {
     // Write to CouchDB (secondary, for offline sync)
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const insertResult = await this.couchDb.insert(couchDoc)
+        const insertResult = await this.couch.insert(couchDoc)
         result.couch.success = true
         result.couch.id = insertResult.id
         result.couch.rev = insertResult.rev
@@ -81,11 +81,7 @@ export class InstrumentDualWriteHelper extends DualWriteHelper {
 
     // Record metrics
     const metrics = createDualWriteMetricsCollector(this.fastify)
-    if (result.overall) {
-      metrics.recordSuccess('instrument', 'write')
-    } else {
-      metrics.recordFailure('instrument', 'write')
-    }
+    metrics.recordOperation('instrument', result)
 
     return result
   }
@@ -101,7 +97,7 @@ export class InstrumentDualWriteHelper extends DualWriteHelper {
     // Get existing document from CouchDB
     let existing: CouchInstrument
     try {
-      existing = await this.couchDb.get(id) as CouchInstrument
+      existing = await this.couch.get(id) as CouchInstrument
     } catch (error) {
       return {
         couch: { success: false, error: error as Error },
@@ -158,10 +154,11 @@ export class InstrumentDualWriteHelper extends DualWriteHelper {
       }
     }
 
-    // Delete from CouchDB
+    // Delete from CouchDB (soft delete)
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        await this.couchDb.destroy(id, rev)
+        const doc = await this.couch.get(id)
+        await this.couch.insert({ ...doc, _deleted: true, _rev: rev })
         result.couch.success = true
         result.couch.id = id
         break
@@ -182,11 +179,7 @@ export class InstrumentDualWriteHelper extends DualWriteHelper {
 
     // Record metrics
     const metrics = createDualWriteMetricsCollector(this.fastify)
-    if (result.overall) {
-      metrics.recordSuccess('instrument', 'delete')
-    } else {
-      metrics.recordFailure('instrument', 'delete')
-    }
+    metrics.recordOperation('instrument', result)
 
     return result
   }
@@ -200,6 +193,6 @@ export function createInstrumentDualWriteHelper(fastify: FastifyInstance): Instr
   if (!db) {
     throw new Error('CouchDB instruments database not available')
   }
-  return new InstrumentDualWriteHelper(fastify, fastify.prisma, db)
+  return new InstrumentDualWriteHelper(fastify, db, fastify.prisma)
 }
 
