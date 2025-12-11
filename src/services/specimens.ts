@@ -74,24 +74,21 @@ export default (
           // Note: status and patientId filters would need to be done via order relation
           // For now, we'll filter by orderId primarily
 
-          const [labSpecimens, count] = await Promise.all([
-            fastify.prisma.labSpecimen.findMany({
-              where,
-              take: parseInt(limit, 10),
-              skip: parseInt(skip, 10),
-              orderBy: { collectedAt: 'desc' },
-              include: {
-                order: {
-                  include: {
-                    patient: true,
-                  },
+          const labSpecimens = await fastify.prisma.labSpecimen.findMany({
+            where,
+            take: parseInt(limit, 10),
+            skip: parseInt(skip, 10),
+            orderBy: { collectedAt: 'desc' },
+            include: {
+              order: {
+                include: {
+                  patient: true,
                 },
-                results: true,
-                transports: true,
               },
-            }),
-            fastify.prisma.labSpecimen.count({ where }),
-          ])
+              results: true,
+              transports: true,
+            },
+          })
 
           // Map Prisma results to CouchDB-like format for compatibility
           specimens = labSpecimens.map((specimen: any) => {
@@ -134,7 +131,14 @@ export default (
             specimens = specimens.filter((s: any) => s.status === status)
           }
 
-          total = specimens.length
+          // Get total count (after filtering if needed)
+          if (patientId || status) {
+            // If filters applied, count is the filtered length
+            total = specimens.length
+          } else {
+            // Otherwise, get total from database
+            total = await fastify.prisma.labSpecimen.count({ where })
+          }
         } catch (pgError) {
           fastify.log.warn({ error: pgError }, 'PostgreSQL Specimens query failed, falling back to CouchDB')
           // Fall through to CouchDB query
