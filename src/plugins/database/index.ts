@@ -58,22 +58,50 @@ const databasePlugin: FastifyPluginAsync = async (fastify) => {
     fastify.log.info('Redis disabled via REDIS_ENABLED=false')
   }
 
-  // Test PostgreSQL connection (required)
-  try {
-    await prisma.$connect()
-    fastify.log.info('PostgreSQL connection established via Prisma')
-  } catch (error) {
-    fastify.log.error(error, 'Failed to connect to PostgreSQL')
-    throw error
+  // Test PostgreSQL connection (with shorter timeout to avoid Fastify plugin timeout)
+  const postgresEnabled = process.env.POSTGRES_ENABLED !== 'false'
+  let prismaClient: any = null
+  
+  if (postgresEnabled) {
+    // Use Promise.race to add a shorter timeout (5 seconds to avoid Fastify timeout)
+    const connectPromise = prisma.$connect()
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('PostgreSQL connection timeout after 5 seconds')), 5000)
+    })
+
+    try {
+      await Promise.race([connectPromise, timeoutPromise])
+      fastify.log.info('PostgreSQL connection established via Prisma')
+      prismaClient = prisma
+    } catch (error) {
+      fastify.log.warn({ error: (error as Error).message }, 'PostgreSQL connection failed or timed out')
+      // Don't throw - allow server to start without PostgreSQL for development
+      // Services will handle missing PostgreSQL gracefully
+      fastify.log.warn('Server will continue without PostgreSQL. Some features may be limited.')
+      prismaClient = null
+      // Disconnect the failed connection (non-blocking)
+      prisma.$disconnect().catch(() => {
+        // Ignore disconnect errors
+      })
+    }
+  } else {
+    fastify.log.info('PostgreSQL disabled via POSTGRES_ENABLED=false')
+    prismaClient = null
   }
 
-  // Add to Fastify instance
-  fastify.decorate('prisma', prisma as any)
+  // Add to Fastify instance (prisma may be null if connection failed or disabled)
+  fastify.decorate('prisma', prismaClient)
   fastify.decorate('redis', redis)
 
   // Graceful shutdown
   fastify.addHook('onClose', async () => {
-    await prisma.$disconnect()
+    if (prismaClient) {
+      try {
+        await prismaClient.$disconnect()
+      } catch (error) {
+        fastify.log.warn({ error }, 'Error disconnecting from PostgreSQL')
+      }
+    }
     if (redis) {
       redis.disconnect()
     }

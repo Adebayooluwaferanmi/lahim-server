@@ -3,6 +3,7 @@ import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
 import { createCouchDBIndexes } from '../lib/db-utils'
 import { createTestCatalogDualWriteHelper } from '../lib/dual-write-helpers/test-catalog-dual-write'
+import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
@@ -13,6 +14,7 @@ export default (
     ? fastify.couch.db.use('test_catalog')
     : null
   const dualWrite = fastify.prisma ? createTestCatalogDualWriteHelper(fastify) : null
+  const cache = createMetricsCacheHelper(fastify, 'test-catalog')
 
   // Create indexes on service load
   createCouchDBIndexes(
@@ -35,6 +37,17 @@ export default (
     }
     try {
       const { limit = 50, skip = 0, active, department, code } = request.query as any
+      
+      // Create cache key
+      const cacheKey = `test-catalog:${active || 'all'}:${department || 'all'}:${code || 'all'}:${limit}:${skip}`
+      
+      // Try to get from cache
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'test_catalog.list_cache_hit')
+        return reply.send(cached)
+      }
+
       const selector: any = { type: 'testCatalogEntry' }
 
       if (active !== undefined) {
@@ -54,14 +67,16 @@ export default (
         sort: [{ code: 'asc' }],
       })
 
-      fastify.log.info({ count: result.docs.length, limit, skip }, 'test_catalog.list')
-      
       // If code is specified, return single entry, otherwise return list
-      if (code && result.docs.length > 0) {
-        reply.send(result.docs[0])
-      } else {
-        reply.send({ entries: result.docs, count: result.docs.length })
-      }
+      const response = code && result.docs.length > 0
+        ? result.docs[0]
+        : { entries: result.docs, count: result.docs.length }
+      
+      // Cache for 30 minutes (test catalog changes infrequently)
+      await cache.set(cacheKey, response, 1800)
+
+      fastify.log.info({ count: result.docs.length, limit, skip }, 'test_catalog.list')
+      reply.send(response)
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'test_catalog.list_failed')
       reply.code(500).send({ error: 'Failed to list test catalog entries' })
@@ -76,12 +91,24 @@ export default (
     }
     try {
       const { id } = request.params as { id: string }
+      
+      // Try cache first
+      const cacheKey = `test-catalog:${id}`
+      const cached = await cache.get(cacheKey)
+      if (cached) {
+        fastify.log.debug({ cacheKey }, 'test_catalog.get_cache_hit')
+        return reply.send(cached)
+      }
+
       const doc = await db.get(id)
 
       if ((doc as any).type !== 'testCatalogEntry') {
         reply.code(404).send({ error: 'Test catalog entry not found' })
         return
       }
+
+      // Cache for 30 minutes (test catalog changes infrequently)
+      await cache.set(cacheKey, doc, 1800)
 
       fastify.log.debug({ id }, 'test_catalog.get')
       reply.send(doc)
@@ -171,6 +198,9 @@ export default (
         result = { id: insertResult.id, rev: insertResult.rev }
       }
 
+      // Invalidate cache
+      await cache.deletePattern('test-catalog:*')
+
       fastify.log.info({ id: result.id, code: entry.code }, 'test_catalog.created')
       reply.code(201).send({ id: result.id, rev: result.rev, ...newEntry })
     } catch (error: unknown) {
@@ -251,6 +281,9 @@ export default (
         const insertResult = await db.insert(updated)
         result = { id: insertResult.id, rev: insertResult.rev }
       }
+
+      // Invalidate cache
+      await cache.deletePattern('test-catalog:*')
 
       fastify.log.info({ id }, 'test_catalog.updated')
       reply.send({ id: result.id, rev: result.rev, ...updated })

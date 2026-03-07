@@ -3,6 +3,7 @@ import { FastifyInstance } from 'fastify'
 import { createCouchDBIndexes } from '../lib/db-utils'
 import { eventBus } from '../lib/event-bus'
 import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
+import { WorklistDualWriteHelper } from '../lib/dual-write-helpers/worklist-dual-write'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
@@ -19,6 +20,15 @@ export default (
     ? fastify.couch.db.use('specimens')
     : null
   const cache = createMetricsCacheHelper(fastify, 'worklists')
+  
+  // Initialize dual-write helper if both databases are available
+  const dualWrite = fastify.prisma && fastify.couchAvailable && fastify.couch
+    ? new WorklistDualWriteHelper(
+        fastify,
+        fastify.couch.db.use('worklists'),
+        fastify.prisma
+      )
+    : null
 
   // Create indexes on service load
   createCouchDBIndexes(
@@ -156,15 +166,15 @@ export default (
 
       // Fallback to CouchDB if PostgreSQL not available or failed
       if (worklists.length === 0 && total === 0 && db) {
-        const selector: any = { type: 'worklist' }
+      const selector: any = { type: 'worklist' }
 
-        if (status) selector.status = status
-        if (date) selector.date = date
+      if (status) selector.status = status
+      if (date) selector.date = date
 
-        const result = await db.find({
-          selector,
-          limit: parseInt(limit, 10),
-          skip: parseInt(skip, 10),
+      const result = await db.find({
+        selector,
+        limit: parseInt(limit, 10),
+        skip: parseInt(skip, 10),
           sort: [{ date: 'desc' }, { createdAt: 'desc' }],
         })
 
@@ -300,7 +310,7 @@ export default (
       // Fallback to CouchDB if PostgreSQL not available or failed
       if (!worklist && db) {
         try {
-          const doc = await db.get(id)
+      const doc = await db.get(id)
           if ((doc as any).type === 'worklist') {
             worklist = doc
           }
@@ -373,28 +383,71 @@ export default (
       })
 
       const now = new Date().toISOString()
+      
+      // Generate ID if not provided
+      const worklistId = `worklist_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      
       const newWorklist: any = {
+        _id: worklistId,
         type: 'worklist',
         date: targetDate,
         mode: mode || 'auto',
         instrumentId,
+        section: 'General', // Default section, could be derived from testCodes
         testCodes: testCodes || [],
         orders: matchingOrders.map((o: any) => ({
           orderId: o._id,
           patientId: o.patientId,
-          tests: o.tests,
+          tests: o.tests || [],
         })),
         specimens: specimensResult.docs.map((s: any) => ({
           specimenId: s._id,
           orderId: s.orderId,
           specimenType: s.specimenType,
         })),
-        status: 'active',
+        status: 'pending',
+        generatedAt: now,
         createdAt: now,
         updatedAt: now,
       }
 
-      const result = await db.insert(newWorklist)
+      // Use dual-write if available, otherwise fallback to CouchDB only
+      let result: { id: string; rev: string }
+      if (dualWrite && fastify.prisma) {
+        try {
+          const dualWriteResult = await dualWrite.writeWorklist(newWorklist, {
+            failOnCouchDB: false, // Don't fail if CouchDB fails
+            failOnPostgres: true, // Fail if PostgreSQL fails
+          })
+
+          if (!dualWriteResult.overall) {
+            fastify.log.error(
+              { 
+                postgres: dualWriteResult.postgres.error,
+                couch: dualWriteResult.couch.error 
+              },
+              'Dual-write failed, falling back to CouchDB only'
+            )
+            // Fallback to CouchDB only
+            const fallbackResult = await db.insert(newWorklist)
+            result = { id: fallbackResult.id, rev: fallbackResult.rev }
+          } else {
+            result = {
+              id: dualWriteResult.postgres.id || dualWriteResult.couch.id || worklistId,
+              rev: dualWriteResult.couch.rev || '',
+            }
+          }
+        } catch (dualWriteError) {
+          fastify.log.error({ error: dualWriteError }, 'Dual-write error, falling back to CouchDB only')
+          // Fallback to CouchDB only
+          const fallbackResult = await db.insert(newWorklist)
+          result = { id: fallbackResult.id, rev: fallbackResult.rev }
+        }
+      } else {
+        // CouchDB only
+        const couchResult = await db.insert(newWorklist)
+        result = { id: couchResult.id, rev: couchResult.rev }
+      }
 
       // Invalidate cache
       await cache.deletePattern('worklists:*')

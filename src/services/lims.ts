@@ -91,6 +91,7 @@ export default (
 
       // Fetch test catalog entry for auto-validation rules
       let validationErrors: string[] = []
+      let deltaCheckWarnings: any[] = []
       const testCodeValue = result.testCode?.coding?.[0]?.code || result.testCode
       
       if (testCodeValue) {
@@ -107,6 +108,7 @@ export default (
           if (catalogResult.docs.length > 0) {
             const catalogEntry = catalogResult.docs[0] as any
             const validationRules = catalogEntry.analyticalPhases?.analytical?.validationRules
+            const deltaCheckRules = catalogEntry.analyticalPhases?.analytical?.deltaCheckRules
 
             // Auto-validation for numeric results
             if (result.resultType === 'numeric' && result.numericValue !== undefined) {
@@ -125,6 +127,82 @@ export default (
                   validationErrors.push(`Value ${result.numericValue} is above reference range (${low}-${high})`)
                 }
               }
+
+              // Delta check: Compare with previous results
+              if (deltaCheckRules?.enabled && result.patientId) {
+                try {
+                  // Query previous results for the same patient and test code
+                  const previousResults = await db.find({
+                    selector: {
+                      type: 'lab_result',
+                      patientId: result.patientId,
+                      'testCode.coding.code': testCodeValue,
+                      resultType: 'numeric',
+                      status: 'final',
+                      numericValue: { $exists: true },
+                      _id: { $ne: result._id || 'new' }, // Exclude current result if updating
+                    },
+                    sort: [{ reportedDateTime: 'desc' }],
+                    limit: deltaCheckRules.lookbackCount || 5, // Default to last 5 results
+                  })
+
+                  if (previousResults.docs.length > 0) {
+                    // Get the most recent previous result
+                    const previousResult = previousResults.docs[0] as any
+                    const previousValue = previousResult.numericValue
+                    const currentValue = result.numericValue
+
+                    if (previousValue !== undefined && previousValue !== null && currentValue !== undefined) {
+                      // Calculate absolute change
+                      const absoluteChange = Math.abs(currentValue - previousValue)
+                      
+                      // Calculate percentage change
+                      const percentageChange = previousValue !== 0 
+                        ? Math.abs((currentValue - previousValue) / previousValue) * 100 
+                        : currentValue !== 0 ? 100 : 0
+
+                      // Check absolute change threshold
+                      if (deltaCheckRules.absoluteChangeThreshold !== undefined && 
+                          absoluteChange > deltaCheckRules.absoluteChangeThreshold) {
+                        deltaCheckWarnings.push({
+                          type: 'absolute_change',
+                          previousValue,
+                          currentValue,
+                          absoluteChange,
+                          threshold: deltaCheckRules.absoluteChangeThreshold,
+                          message: `Significant absolute change detected: ${absoluteChange.toFixed(2)} (threshold: ${deltaCheckRules.absoluteChangeThreshold})`,
+                          previousResultId: previousResult._id,
+                          previousReportedDateTime: previousResult.reportedDateTime,
+                        })
+                      }
+
+                      // Check percentage change threshold
+                      if (deltaCheckRules.percentageChangeThreshold !== undefined && 
+                          percentageChange > deltaCheckRules.percentageChangeThreshold) {
+                        deltaCheckWarnings.push({
+                          type: 'percentage_change',
+                          previousValue,
+                          currentValue,
+                          percentageChange: percentageChange.toFixed(2),
+                          threshold: deltaCheckRules.percentageChangeThreshold,
+                          message: `Significant percentage change detected: ${percentageChange.toFixed(2)}% (threshold: ${deltaCheckRules.percentageChangeThreshold}%)`,
+                          previousResultId: previousResult._id,
+                          previousReportedDateTime: previousResult.reportedDateTime,
+                        })
+                      }
+
+                      // If delta check is set to fail on violation, add to validation errors
+                      if (deltaCheckRules.failOnViolation && deltaCheckWarnings.length > 0) {
+                        deltaCheckWarnings.forEach((warning) => {
+                          validationErrors.push(warning.message)
+                        })
+                      }
+                    }
+                  }
+                } catch (deltaCheckError) {
+                  fastify.log.warn({ error: deltaCheckError, testCode: testCodeValue }, 'Failed to perform delta check')
+                }
+              }
             }
           }
         } catch (catalogError) {
@@ -133,16 +211,32 @@ export default (
       }
 
       if (validationErrors.length > 0) {
-        reply.code(400).send({ error: 'Validation failed', validationErrors })
+        reply.code(400).send({ 
+          error: 'Validation failed', 
+          validationErrors,
+          deltaCheckWarnings: deltaCheckWarnings.length > 0 ? deltaCheckWarnings : undefined,
+        })
         return
       }
 
       const now = new Date().toISOString()
+      
+      // Add flags for delta check failures
+      const flags = result.flags || []
+      if (deltaCheckWarnings.length > 0) {
+        flags.push('delta-check-failed')
+      }
+
       const newResult = {
         ...result,
         type: 'lab_result',
         status: result.status || 'final',
         reportedDateTime: result.reportedDateTime || now,
+        flags,
+        deltaCheck: deltaCheckWarnings.length > 0 ? {
+          warnings: deltaCheckWarnings,
+          checkedAt: now,
+        } : undefined,
         createdAt: now,
         updatedAt: now,
       }
@@ -179,7 +273,12 @@ export default (
       }
 
       fastify.log.info({ id: insertResult.id, patientId: result.patientId }, 'lab_results.created')
-      reply.code(201).send({ id: insertResult.id, rev: insertResult.rev, ...newResult })
+      reply.code(201).send({ 
+        id: insertResult.id, 
+        rev: insertResult.rev, 
+        ...newResult,
+        deltaCheckWarnings: deltaCheckWarnings.length > 0 ? deltaCheckWarnings : undefined,
+      })
     } catch (error: unknown) {
       fastify.log.error(error as Error, 'lab_results.create_failed')
       reply.code(500).send({ error: 'Failed to create lab result' })
@@ -447,6 +546,45 @@ export default (
       }
       fastify.log.error({ error: error as Error, id: (request.params as any).id }, 'lab_results.interpretation_failed')
       reply.code(500).send({ error: 'Failed to get interpretation' })
+    }
+  })
+
+  // GET /lab-results/previous - Get previous results for delta check comparison
+  fastify.get('/lab-results/previous', async (request, reply) => {
+    try {
+      const { patientId, testCode, limit = 5, excludeId } = request.query as any
+
+      if (!patientId || !testCode) {
+        reply.code(400).send({ error: 'Patient ID and test code are required' })
+        return
+      }
+
+      const testCodeValue = typeof testCode === 'string' ? testCode : (testCode as any)?.coding?.[0]?.code || testCode
+
+      const selector: any = {
+        type: 'lab_result',
+        patientId,
+        'testCode.coding.code': testCodeValue,
+        resultType: 'numeric',
+        status: 'final',
+        numericValue: { $exists: true },
+      }
+
+      if (excludeId) {
+        selector._id = { $ne: excludeId }
+      }
+
+      const result = await db.find({
+        selector,
+        sort: [{ reportedDateTime: 'desc' }],
+        limit: parseInt(limit, 10),
+      })
+
+      fastify.log.debug({ patientId, testCode: testCodeValue, count: result.docs.length }, 'lab_results.previous_retrieved')
+      reply.send({ previousResults: result.docs, count: result.docs.length })
+    } catch (error: unknown) {
+      fastify.log.error(error as Error, 'lab_results.previous_failed')
+      reply.code(500).send({ error: 'Failed to get previous results' })
     }
   })
 

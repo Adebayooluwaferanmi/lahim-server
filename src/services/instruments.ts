@@ -61,8 +61,8 @@ export default (
 
       const response = { instruments: result.docs, count: result.docs.length }
       
-      // Cache for 5 minutes
-      await cache.set(cacheKey, response, 300)
+      // Cache for 30 minutes (instruments change infrequently)
+      await cache.set(cacheKey, response, 1800)
 
       fastify.log.info({ count: result.docs.length }, 'instruments.list')
       reply.send(response)
@@ -96,8 +96,8 @@ export default (
         return
       }
 
-      // Cache for 10 minutes
-      await cache.set(cacheKey, doc, 600)
+      // Cache for 15 minutes (instruments change infrequently)
+      await cache.set(cacheKey, doc, 900)
 
       fastify.log.debug({ id }, 'instruments.get')
       reply.send(doc)

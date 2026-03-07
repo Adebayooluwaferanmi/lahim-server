@@ -46,6 +46,7 @@ export default (
       'vocabularies_value_sets',
       [
         { index: { fields: ['type', 'listId'] }, name: 'type-listId-index' },
+        { index: { fields: ['listId', 'display'] }, name: 'listId-display-index' },
       ],
       'Vocabularies (value sets)'
     )
@@ -536,10 +537,23 @@ export default (
         selector,
         limit: parseInt(limit, 10),
         skip: parseInt(skip, 10),
-        sort: [{ listId: 'asc' }, { display: 'asc' }],
       })
 
-      const response = { valueSets: result.docs, count: result.docs.length }
+      // Sort in application code to avoid CouchDB sort index requirements
+      const sortedDocs = (result.docs as any[]).sort((a, b) => {
+        const listA = (a.listId || '').toString().toLowerCase()
+        const listB = (b.listId || '').toString().toLowerCase()
+        if (listA < listB) return -1
+        if (listA > listB) return 1
+
+        const dispA = (a.display || '').toString().toLowerCase()
+        const dispB = (b.display || '').toString().toLowerCase()
+        if (dispA < dispB) return -1
+        if (dispA > dispB) return 1
+        return 0
+      })
+
+      const response = { valueSets: sortedDocs, count: sortedDocs.length }
       
       // Cache for 1 hour
       if (cache) {
@@ -568,11 +582,18 @@ export default (
           listId,
           active: true,
         },
-        sort: [{ display: 'asc' }],
       })
 
-      fastify.log.debug({ listId, count: result.docs.length }, 'vocabularies.value_sets.get')
-      reply.send({ listId, items: result.docs, count: result.docs.length })
+      const sortedItems = (result.docs as any[]).sort((a, b) => {
+        const dispA = (a.display || '').toString().toLowerCase()
+        const dispB = (b.display || '').toString().toLowerCase()
+        if (dispA < dispB) return -1
+        if (dispA > dispB) return 1
+        return 0
+      })
+
+      fastify.log.debug({ listId, count: sortedItems.length }, 'vocabularies.value_sets.get')
+      reply.send({ listId, items: sortedItems, count: sortedItems.length })
     } catch (error: unknown) {
       fastify.log.error({ error: error as Error, listId: (request.params as any).listId }, 'vocabularies.value_sets.get_failed')
       reply.code(500).send({ error: 'Failed to get value set' })

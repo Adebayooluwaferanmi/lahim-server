@@ -3,6 +3,7 @@ import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
 import { createCouchDBIndexes } from '../lib/db-utils'
 import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
+import { QCResultDualWriteHelper } from '../lib/dual-write-helpers/qc-result-dual-write'
 
 const checkQCRequirement = async (
   fastify: FastifyInstance,
@@ -84,7 +85,16 @@ export default (
 
   const db = fastify.couch.db.use('qc_results')
   const cache = createMetricsCacheHelper(fastify, 'qc-results')
-
+  
+  // Initialize dual-write helper if both databases are available
+  const dualWrite = fastify.prisma && fastify.couchAvailable && fastify.couch
+    ? new QCResultDualWriteHelper(
+        fastify,
+        fastify.couch.db.use('qc_results'),
+        fastify.prisma
+      )
+    : null
+  
   // Create indexes for sorted queries
   createCouchDBIndexes(
     fastify,
@@ -340,17 +350,62 @@ export default (
       }
 
       const now = new Date().toISOString()
+      
+      // Generate ID if not provided
+      const qcResultId = qcResult._id || `qc_result_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      
       const newQCResult = {
         ...qcResult,
+        _id: qcResultId,
         type: 'qc_result',
         runDate: qcResult.runDate || now,
+        runAt: qcResult.runAt || qcResult.runDate || now,
+        actualValue: qcResult.result || qcResult.actualValue || qcResult.measuredValue,
+        measuredValue: qcResult.result || qcResult.actualValue || qcResult.measuredValue,
+        materialLot: qcResult.materialLot || qcResult.materialId,
         qcRuleViolations: westgardViolations,
         status: qcResult.status || qcStatus,
         createdAt: now,
         updatedAt: now,
       }
 
-      const result = await db.insert(newQCResult)
+      // Use dual-write if available, otherwise fallback to CouchDB only
+      let result: { id: string; rev: string }
+      if (dualWrite && fastify.prisma) {
+        try {
+          const dualWriteResult = await dualWrite.writeQCResult(newQCResult, {
+            failOnCouchDB: false, // Don't fail if CouchDB fails
+            failOnPostgres: true, // Fail if PostgreSQL fails
+          })
+
+          if (!dualWriteResult.overall) {
+            fastify.log.error(
+              { 
+                postgres: dualWriteResult.postgres.error,
+                couch: dualWriteResult.couch.error 
+              },
+              'Dual-write failed, falling back to CouchDB only'
+            )
+            // Fallback to CouchDB only
+            const fallbackResult = await db.insert(newQCResult)
+            result = { id: fallbackResult.id, rev: fallbackResult.rev }
+          } else {
+            result = {
+              id: dualWriteResult.postgres.id || dualWriteResult.couch.id || qcResultId,
+              rev: dualWriteResult.couch.rev || '',
+            }
+          }
+        } catch (dualWriteError) {
+          fastify.log.error({ error: dualWriteError }, 'Dual-write error, falling back to CouchDB only')
+          // Fallback to CouchDB only
+          const fallbackResult = await db.insert(newQCResult)
+          result = { id: fallbackResult.id, rev: fallbackResult.rev }
+        }
+      } else {
+        // CouchDB only
+        const couchResult = await db.insert(newQCResult)
+        result = { id: couchResult.id, rev: couchResult.rev }
+      }
 
       // Publish event
       try {

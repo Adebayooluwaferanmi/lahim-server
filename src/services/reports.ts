@@ -3,10 +3,15 @@ import { FastifyInstance } from 'fastify'
 import { ensureCouchDBDatabase, createCouchDBIndexes } from '../lib/db-utils'
 import { createMetricsCacheHelper } from '../lib/monitoring/cache-metrics'
 import { randomUUID } from 'crypto'
+import { generateHL7Message } from '../lib/formatters/hl7-formatter'
+import { generateFHIRDiagnosticReport } from '../lib/formatters/fhir-formatter'
+import { sendReportEmail } from '../lib/delivery/email-delivery'
+import { sendReportSMS } from '../lib/delivery/sms-delivery'
 
 interface DeliveryRequest {
-  methods: ('email' | 'portal' | 'print' | 'api' | 'hl7')[]
+  methods: ('email' | 'portal' | 'print' | 'api' | 'hl7' | 'sms')[]
   emailAddress?: string
+  phoneNumber?: string
   recipientName?: string
 }
 
@@ -18,6 +23,9 @@ interface Report {
   deliveryStatus?: string
   deliveryHistory?: any[]
   updatedAt?: string
+  formattedContent?: string | object
+  contentType?: string
+  [key: string]: any // Allow additional properties from CouchDB
 }
 
 export default async (
@@ -162,6 +170,44 @@ export default async (
     }
   })
 
+  // GET /reports/:id/download - Download formatted report content (HL7/FHIR)
+  fastify.get('/reports/:id/download', async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string }
+      const doc = await db.get(id) as any
+
+      if (doc.type !== 'report') {
+        reply.code(404).send({ error: 'Report not found' })
+        return
+      }
+
+      if (!doc.formattedContent) {
+        reply.code(404).send({ error: 'Formatted content not available for this report' })
+        return
+      }
+
+      const contentType = doc.contentType || 'application/json'
+      const format = doc.format || 'JSON'
+      const filename = `${doc.reportNumber || id}.${format.toLowerCase()}`
+
+      reply
+        .header('Content-Type', contentType)
+        .header('Content-Disposition', `attachment; filename="${filename}"`)
+        .send(typeof doc.formattedContent === 'string' 
+          ? doc.formattedContent 
+          : JSON.stringify(doc.formattedContent, null, 2))
+
+      fastify.log.debug({ id, format }, 'reports.downloaded')
+    } catch (error: unknown) {
+      if ((error as any)?.status === 404) {
+        reply.code(404).send({ error: 'Report not found' })
+        return
+      }
+      fastify.log.error({ error: error as Error, id: (request.params as any).id }, 'reports.download_failed')
+      reply.code(500).send({ error: 'Failed to download report' })
+    }
+  })
+
   // POST /reports - Generate report
   fastify.post('/reports', async (request, reply) => {
     try {
@@ -174,6 +220,93 @@ export default async (
 
       const now = new Date().toISOString()
       const reportNumber = await generateReportNumber(reportRequest.reportType)
+      const format = reportRequest.format || 'PDF'
+      
+      // Generate formatted content based on format type
+      let formattedContent: string | object | undefined
+      let contentType = 'application/json'
+      
+      if (format === 'HL7' || format === 'hl7') {
+        // Generate HL7 message
+        try {
+          const labResultsDb = fastify.couch?.db.use('lab_results')
+          if (labResultsDb && reportRequest.patientId && reportRequest.data?.resultIds) {
+            // Fetch lab results
+            const resultIds = Array.isArray(reportRequest.data.resultIds) 
+              ? reportRequest.data.resultIds 
+              : [reportRequest.data.resultIds]
+            
+            const results = await Promise.all(
+              resultIds.map((id: string) => labResultsDb.get(id).catch(() => null))
+            )
+            const validResults = results.filter((r) => r !== null) as any[]
+            
+            if (validResults.length > 0) {
+              formattedContent = generateHL7Message(
+                validResults,
+                {
+                  id: reportRequest.patientId,
+                  name: reportRequest.data.patientName,
+                  dateOfBirth: reportRequest.data.patientDateOfBirth,
+                  gender: reportRequest.data.patientGender,
+                  mrn: reportRequest.data.patientMRN,
+                },
+                {
+                  name: reportRequest.facilityName,
+                  address: reportRequest.facilityAddress,
+                  id: reportRequest.data.facilityId,
+                },
+                reportRequest.data.orderNumber,
+                reportRequest.data.specimenId,
+                reportRequest.data.collectedDateTime
+              )
+              contentType = 'text/plain'
+            }
+          }
+        } catch (hl7Error) {
+          fastify.log.warn({ error: hl7Error }, 'Failed to generate HL7 message')
+        }
+      } else if (format === 'FHIR' || format === 'fhir') {
+        // Generate FHIR DiagnosticReport
+        try {
+          const labResultsDb = fastify.couch?.db.use('lab_results')
+          if (labResultsDb && reportRequest.patientId && reportRequest.data?.resultIds) {
+            // Fetch lab results
+            const resultIds = Array.isArray(reportRequest.data.resultIds) 
+              ? reportRequest.data.resultIds 
+              : [reportRequest.data.resultIds]
+            
+            const results = await Promise.all(
+              resultIds.map((id: string) => labResultsDb.get(id).catch(() => null))
+            )
+            const validResults = results.filter((r) => r !== null) as any[]
+            
+            if (validResults.length > 0) {
+              formattedContent = generateFHIRDiagnosticReport(
+                validResults,
+                {
+                  id: reportRequest.patientId,
+                  name: reportRequest.data.patientName,
+                  dateOfBirth: reportRequest.data.patientDateOfBirth,
+                  gender: reportRequest.data.patientGender,
+                  mrn: reportRequest.data.patientMRN,
+                },
+                {
+                  name: reportRequest.facilityName,
+                  address: reportRequest.facilityAddress,
+                  id: reportRequest.data.facilityId,
+                },
+                reportRequest.data.orderNumber,
+                reportRequest.data.specimenId,
+                reportRequest.data.collectedDateTime
+              )
+              contentType = 'application/fhir+json'
+            }
+          }
+        } catch (fhirError) {
+          fastify.log.warn({ error: fhirError }, 'Failed to generate FHIR DiagnosticReport')
+        }
+      }
 
       const newReport = {
         _id: `report_${Date.now()}_${randomUUID()}`,
@@ -181,7 +314,7 @@ export default async (
         reportNumber,
         reportType: reportRequest.reportType,
         status: reportRequest.status || 'Generated',
-        format: reportRequest.format || 'PDF',
+        format,
         patientId: reportRequest.patientId,
         visitId: reportRequest.visitId,
         generatedOn: now,
@@ -189,6 +322,8 @@ export default async (
         title: reportRequest.title,
         description: reportRequest.description,
         data: reportRequest.data || {},
+        formattedContent, // Store formatted content (HL7/FHIR)
+        contentType, // Store content type
         deliveryMethods: reportRequest.deliveryMethods || [],
         deliveryStatus: reportRequest.deliveryStatus,
         deliveryHistory: reportRequest.deliveryHistory || [],
@@ -304,30 +439,84 @@ export default async (
       const now = new Date().toISOString()
       const deliveryHistory = report.deliveryHistory || []
 
-      // Simulate delivery for each method
-      const deliveries = deliveryReq.methods.map((method) => {
-        // In a real implementation, this would actually send emails, print, etc.
-        let delivery: any = {
-          method,
-          deliveredAt: now,
-          deliveredTo: deliveryReq.emailAddress || deliveryReq.recipientName || 'N/A',
-          status: 'success',
-          error: undefined,
-        }
-
-        // Add specific logic for each method if needed
-        if (method === 'email' && !deliveryReq.emailAddress) {
-          delivery = {
-            ...delivery,
-            status: 'failed',
-            error: 'Email address not provided',
+      // Deliver via each requested method
+      const deliveries = await Promise.all(
+        deliveryReq.methods.map(async (method) => {
+          let delivery: any = {
+            method,
+            deliveredAt: now,
+            deliveredTo: deliveryReq.emailAddress || deliveryReq.phoneNumber || deliveryReq.recipientName || 'N/A',
+            status: 'pending',
+            error: undefined,
           }
-        }
-        // For 'print', 'portal', 'api', 'hl7' we assume success for now
 
-        deliveryHistory.push(delivery)
-        return delivery
-      })
+          try {
+            if (method === 'email') {
+              if (!deliveryReq.emailAddress) {
+                delivery.status = 'failed'
+                delivery.error = 'Email address not provided'
+              } else {
+                // Get report content for attachment
+                let reportContent: string | Buffer | undefined
+                if (report.formattedContent) {
+                  reportContent = typeof report.formattedContent === 'string'
+                    ? Buffer.from(report.formattedContent)
+                    : Buffer.from(JSON.stringify(report.formattedContent))
+                }
+
+                const emailResult = await sendReportEmail(deliveryReq.emailAddress, report, reportContent)
+                if (emailResult.success) {
+                  delivery.status = 'success'
+                  delivery.deliveredAt = new Date().toISOString()
+                } else {
+                  delivery.status = 'failed'
+                  delivery.error = emailResult.error
+                }
+              }
+            } else if (method === 'sms') {
+              if (!deliveryReq.phoneNumber) {
+                delivery.status = 'failed'
+                delivery.error = 'Phone number not provided'
+              } else {
+                const smsResult = await sendReportSMS(deliveryReq.phoneNumber, report)
+                if (smsResult.success) {
+                  delivery.status = 'success'
+                  delivery.deliveredAt = new Date().toISOString()
+                  delivery.messageId = smsResult.messageId
+                } else {
+                  delivery.status = 'failed'
+                  delivery.error = smsResult.error
+                }
+              }
+            } else if (method === 'print') {
+              // Print delivery - would integrate with print queue
+              delivery.status = 'success'
+              delivery.deliveredAt = new Date().toISOString()
+              delivery.deliveredTo = 'Print Queue'
+            } else if (method === 'portal') {
+              // Portal delivery - mark as available in portal
+              delivery.status = 'success'
+              delivery.deliveredAt = new Date().toISOString()
+              delivery.deliveredTo = 'Patient Portal'
+            } else if (method === 'api' || method === 'hl7') {
+              // API/HL7 delivery - webhook or direct integration
+              delivery.status = 'success'
+              delivery.deliveredAt = new Date().toISOString()
+              delivery.deliveredTo = 'API/HL7 Interface'
+            } else {
+              delivery.status = 'failed'
+              delivery.error = `Unknown delivery method: ${method}`
+            }
+          } catch (error: any) {
+            delivery.status = 'failed'
+            delivery.error = error.message || 'Delivery failed'
+            fastify.log.error({ error, method, reportId: id }, 'report.delivery_failed')
+          }
+
+          deliveryHistory.push(delivery)
+          return delivery
+        })
+      )
 
       report.deliveryMethods = deliveryReq.methods
       report.deliveryStatus = deliveries.some((d: any) => d.status === 'failed') ? 'failed' : 'delivered'

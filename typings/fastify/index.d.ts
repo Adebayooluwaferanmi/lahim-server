@@ -1,6 +1,9 @@
 import 'fastify'
 declare module 'fastify' {
-  interface FastifyInstance {
-    blipp(): unknown
+  interface FastifyBaseLogger {
+    debug(...args: any[]): void
+    info(...args: any[]): void
+    warn(...args: any[]): void
+    error(...args: any[]): void
   }
 }
