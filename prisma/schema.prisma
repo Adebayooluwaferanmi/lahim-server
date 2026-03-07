@@ -52,8 +52,10 @@ model Patient {
   updatedAt   DateTime  @updatedAt
 
   // Relations
-  labOrders      LabOrder[]
-  criticalValues CriticalValue[]
+  labOrders               LabOrder[]
+  criticalValues           CriticalValue[]
+  externalAccessRequests   ExternalAccessRequest[]
+  externalAccessTokens     ExternalAccessToken[]
 
   @@index([patientId])
   @@index([lastName, firstName])
@@ -95,6 +97,7 @@ model LabOrder {
   finalizedAt    DateTime?
   facilityId     String?
   practitionerId String?
+  source         String?   // e.g. external_one_time for one-time external access
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -155,6 +158,7 @@ model LabResult {
   flags            String[] // critical, abnormal, delta-check-failed
   finalizedAt      DateTime?
   performerId      String?
+  source           String?   // e.g. external_one_time for one-time external access
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -479,4 +483,213 @@ model EquipmentMaintenance {
   @@index([equipmentId])
   @@index([scheduledAt])
   @@index([type])
+}
+
+// Document Control - ISO 15189 Quality Management
+model Document {
+  id              String    @id @default(uuid())
+  documentNumber  String    @unique // Auto-generated (e.g., DOC-2024-001)
+  type            String // SOP, Policy, Procedure, Form, Manual
+  category        String? // Quality, Technical, Administrative
+  title           String
+  description     String?
+  version         String    @default("1.0")
+  status          String    @default("draft") // draft, under-review, approved, active, superseded, archived
+  filename        String?
+  filePath        String? // Path to stored file
+  contentType     String?
+  fileSize        Int? // Size in bytes
+  effectiveDate   DateTime?
+  reviewDate      DateTime?
+  nextReviewDate  DateTime?
+  approvedBy      String?
+  approvedOn      DateTime?
+  createdBy       String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  revisions DocumentRevision[]
+  approvals DocumentApproval[]
+
+  @@index([documentNumber])
+  @@index([type])
+  @@index([status])
+  @@index([category])
+  @@index([effectiveDate])
+}
+
+model DocumentRevision {
+  id          String   @id @default(uuid())
+  documentId String
+  version     String
+  changeLog   String?
+  revisedBy   String
+  revisedAt   DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([version])
+}
+
+model DocumentApproval {
+  id          String   @id @default(uuid())
+  documentId String
+  approverId  String
+  approverName String?
+  status      String // pending, approved, rejected
+  comments    String?
+  approvedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+  @@index([approverId])
+  @@index([status])
+}
+
+// Audit Management - ISO 15189 Quality Management
+model Audit {
+  id              String    @id @default(uuid())
+  auditNumber     String    @unique // Auto-generated (e.g., AUD-2024-001)
+  type            String // internal, external, supplier
+  scope           String
+  status          String    @default("planned") // planned, in-progress, completed, cancelled
+  scheduledDate   DateTime
+  conductedDate   DateTime?
+  conductedBy     String?
+  auditorName     String?
+  department      String?
+  findings        String? // JSON or text
+  conclusion      String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  findingsList AuditFinding[]
+  actions      CorrectiveAction[]
+
+  @@index([auditNumber])
+  @@index([type])
+  @@index([status])
+  @@index([scheduledDate])
+  @@index([department])
+}
+
+model AuditFinding {
+  id          String   @id @default(uuid())
+  auditId     String
+  severity    String // minor, major, critical
+  description String
+  clause      String? // ISO 15189 clause reference
+  status      String   @default("open") // open, in-progress, resolved, closed
+  assignedTo  String?
+  dueDate     DateTime?
+  resolvedAt  DateTime?
+  resolution  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  audit         Audit             @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  correctiveActions CorrectiveAction[]
+
+  @@index([auditId])
+  @@index([severity])
+  @@index([status])
+  @@index([assignedTo])
+}
+
+model CorrectiveAction {
+  id          String   @id @default(uuid())
+  auditId     String?
+  findingId   String?
+  type         String // corrective, preventive (CAPA)
+  description  String
+  rootCause    String?
+  actionPlan   String
+  assignedTo   String?
+  dueDate      DateTime
+  status       String   @default("open") // open, in-progress, completed, verified, closed
+  completedAt  DateTime?
+  verifiedBy   String?
+  verifiedAt   DateTime?
+  effectiveness String? // effective, ineffective, pending
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  audit   Audit?        @relation(fields: [auditId], references: [id], onDelete: SetNull)
+  finding AuditFinding? @relation(fields: [findingId], references: [id], onDelete: SetNull)
+
+  @@index([auditId])
+  @@index([findingId])
+  @@index([type])
+  @@index([status])
+  @@index([assignedTo])
+  @@index([dueDate])
+}
+
+// One-time external access (patient-initiated 24h link for doctor/lab)
+model ExternalAccessRequest {
+  id            String    @id @default(uuid())
+  patientId     String    // Core patient ID (Patient.patientId)
+  requestedBy   String?   // Portal user id or identifier
+  recipientEmail String
+  type          String    // VIEW_RECORD | UPDATE_LABS
+  status        String    @default("pending") // pending, approved, rejected
+  approvedAt    DateTime?
+  approvedBy    String?
+  tokenId       String?   // Set when approved -> ExternalAccessToken.id
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  patient Patient             @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+  token   ExternalAccessToken?
+
+  @@index([patientId])
+  @@index([status])
+  @@index([recipientEmail])
+  @@index([createdAt])
+}
+
+model ExternalAccessToken {
+  id             String    @id @default(uuid())
+  requestId      String    @unique
+  tokenHash      String    // Hashed token (never store raw)
+  patientId      String
+  type           String    // VIEW_RECORD | UPDATE_LABS
+  expiresAt      DateTime
+  maxUses        Int       @default(1)
+  useCount       Int       @default(0)
+  recipientEmail String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  request ExternalAccessRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  patient Patient                @relation(fields: [patientId], references: [patientId], onDelete: Cascade)
+
+  @@index([tokenHash])
+  @@index([patientId])
+  @@index([expiresAt])
+}
+
+// External doctor note (one-time access flow)
+model ExternalAccessNote {
+  id        String   @id @default(uuid())
+  tokenId   String   // ExternalAccessToken.id
+  patientId String
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tokenId])
+  @@index([patientId])
 }

@@ -29,7 +29,7 @@ function LaHIM(fastify: FastifyInstance, opts: any, next: (err?: FastifyError) =
       }
     },
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Service-Token', 'X-Access-Token'],
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   })
   
@@ -57,6 +57,10 @@ function LaHIM(fastify: FastifyInstance, opts: any, next: (err?: FastifyError) =
   // Initialize event handlers
   const { initializeEventHandlers } = require('./services/event-handlers')
   initializeEventHandlers(fastify)
+
+  // Initialize maintenance scheduler
+  const { initializeMaintenanceScheduler } = require('./lib/schedulers/maintenance-scheduler')
+  initializeMaintenanceScheduler(fastify)
 
   // This loads all application wide plugins defined in plugins folder
   fastify.register(AutoLoad, {
