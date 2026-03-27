@@ -107,7 +107,8 @@ const observabilityPlugin: FastifyPluginAsync = async (fastify) => {
 
   fastify.addHook('onResponse', async (request, reply) => {
     const duration = (Date.now() - ((request as any).startTime || Date.now())) / 1000
-    const route = request.routerPath || request.url
+    const routeUrl = request.url?.split('?')[0] || '/'
+    const route = (request as { routerPath?: string }).routerPath ?? routeUrl
     const method = request.method
     const statusCode = reply.statusCode
 
@@ -129,7 +130,8 @@ const observabilityPlugin: FastifyPluginAsync = async (fastify) => {
 
   // Error tracking
   fastify.addHook('onError', async (request, _reply, error) => {
-    const route = request.routerPath || request.url
+    const routeUrl = request.url?.split('?')[0] || '/'
+    const route = (request as { routerPath?: string }).routerPath ?? routeUrl
     const method = request.method
 
     httpRequestErrors.inc({

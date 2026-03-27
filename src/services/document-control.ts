@@ -23,23 +23,23 @@ export default async (
     fastify.log.warn('Document Control service: CouchDB not available - endpoints will return stub responses')
     
     // Register stub endpoints when CouchDB is unavailable
-    fastify.get('/document-control', async (request, reply) => {
+    fastify.get('/document-control', async (_request, reply) => {
       reply.send({ documents: [], count: 0 })
     })
     
-    fastify.get('/document-control/:id', async (request, reply) => {
+    fastify.get('/document-control/:id', async (_request, reply) => {
       reply.code(503).send({ error: 'CouchDB is not available' })
     })
     
-    fastify.post('/document-control', async (request, reply) => {
+    fastify.post('/document-control', async (_request, reply) => {
       reply.code(503).send({ error: 'CouchDB is not available' })
     })
     
-    fastify.put('/document-control/:id', async (request, reply) => {
+    fastify.put('/document-control/:id', async (_request, reply) => {
       reply.code(503).send({ error: 'CouchDB is not available' })
     })
     
-    fastify.post('/document-control/:id/approve', async (request, reply) => {
+    fastify.post('/document-control/:id/approve', async (_request, reply) => {
       reply.code(503).send({ error: 'CouchDB is not available' })
     })
     

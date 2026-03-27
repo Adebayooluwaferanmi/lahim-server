@@ -5,7 +5,7 @@
 
 import { createHash, randomBytes } from 'crypto'
 import { Server, IncomingMessage, ServerResponse } from 'http'
-import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
+import { FastifyInstance, FastifyRequest } from 'fastify'
 import { sendExternalAccessLinkEmail } from '../lib/delivery/email-delivery'
 
 const TOKEN_BYTES = 32
@@ -191,7 +191,7 @@ export default async function externalAccessService(
         dateOfBirth: patient.dateOfBirth,
         sex: patient.sex,
       },
-      labOrders: orders.map((o) => ({
+      labOrders: orders.map((o: (typeof orders)[number]) => ({
         ...o,
         source: o.source || null,
         results: (o.results || []).map((r: { source?: string; [k: string]: unknown }) => ({
@@ -269,7 +269,7 @@ export default async function externalAccessService(
       where: { code: { in: results.map((r) => r.testCodeLoinc as string).filter(Boolean) } },
       select: { code: true },
     })
-    const validCodes = new Set(testCatalogCodes.map((c) => c.code))
+    const validCodes = new Set(testCatalogCodes.map((c: (typeof testCatalogCodes)[number]) => c.code))
     const orderIds: string[] = []
 
     for (const r of results) {

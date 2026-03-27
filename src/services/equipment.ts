@@ -12,7 +12,11 @@ import { eventBus } from '../lib/event-bus'
 import { CacheHelper } from '../lib/db-utils'
 import { createCouchDBIndexes, ensureCouchDBDatabase } from '../lib/db-utils'
 import { createEquipmentDualWriteHelper } from '../lib/dual-write-helpers/equipment-dual-write'
-import { CouchEquipment, CouchEquipmentMaintenance } from '../lib/mappers/equipment-mapper'
+import {
+  CouchEquipment,
+  CouchEquipmentMaintenance,
+  MaintenancePlan as StoredMaintenancePlan,
+} from '../lib/mappers/equipment-mapper'
 import { computeNextDue } from '../lib/equipment/compute-next-due'
 import {
   EquipmentCreateUpdateSchema,
@@ -102,22 +106,23 @@ export default (
         const id = `equipment:${randomUUID()}`
 
         // Process maintenance plan if provided
-        let maintenancePlan = equipmentData.maintenancePlan
-        if (maintenancePlan) {
+        let maintenancePlan: StoredMaintenancePlan | undefined
+        if (equipmentData.maintenancePlan) {
+          let plan = { ...equipmentData.maintenancePlan }
           // Normalize kind
-          if (maintenancePlan.kind === 'weekly') {
-            maintenancePlan = { ...maintenancePlan, intervalValue: 1, intervalUnit: 'weeks' as const }
-          } else if (maintenancePlan.kind === 'monthly') {
-            maintenancePlan = { ...maintenancePlan, intervalValue: 1, intervalUnit: 'months' as const }
+          if (plan.kind === 'weekly') {
+            plan = { ...plan, intervalValue: 1, intervalUnit: 'weeks' as const }
+          } else if (plan.kind === 'monthly') {
+            plan = { ...plan, intervalValue: 1, intervalUnit: 'months' as const }
           }
 
           // Compute nextDue (never accept from client)
           const nextDue = computeNextDue(
-            maintenancePlan.lastDate || null,
-            maintenancePlan.intervalValue,
-            maintenancePlan.intervalUnit
+            plan.lastDate || null,
+            plan.intervalValue,
+            plan.intervalUnit
           )
-          maintenancePlan = { ...maintenancePlan, nextDue }
+          maintenancePlan = { ...plan, nextDue } as StoredMaintenancePlan
         }
 
       const newEquipment: CouchEquipment = {
@@ -384,10 +389,13 @@ export default (
               maintenancePlan.intervalValue,
               maintenancePlan.intervalUnit
             )
-            maintenancePlan = { ...maintenancePlan, nextDue }
+            maintenancePlan = { ...maintenancePlan, nextDue } as StoredMaintenancePlan
           } else {
             // Preserve existing nextDue if plan unchanged
-            maintenancePlan = { ...maintenancePlan, nextDue: existingPlan.nextDue }
+            maintenancePlan = {
+              ...maintenancePlan,
+              nextDue: existingPlan.nextDue,
+            } as StoredMaintenancePlan
           }
         }
 
@@ -590,7 +598,7 @@ export default (
         // If routine maintenance and maintenance plan exists, update nextDue
         if (eventData.maintenanceType === 'routine' && (equipment as any).maintenancePlan) {
           const plan = (equipment as any).maintenancePlan
-          const updatedPlan = {
+          const updatedPlan: StoredMaintenancePlan = {
             ...plan,
             lastDate: eventData.performedAt,
             nextDue: computeNextDue(eventData.performedAt, plan.intervalValue, plan.intervalUnit),
@@ -762,7 +770,7 @@ export default (
   fastify.get('/equipment/:id/history', async (request, reply) => {
     // Redirect to new endpoint
     const { id } = request.params as { id: string }
-    reply.redirect(302, `/equipment/${id}/maintenance`)
+    reply.redirect(`/equipment/${id}/maintenance`, 302)
   })
 
   // POST /equipment/:id/calibrate - Record calibration (legacy)

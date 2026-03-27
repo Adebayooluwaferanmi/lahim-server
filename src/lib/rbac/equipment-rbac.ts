@@ -123,7 +123,7 @@ export function createEquipmentAuthHook(
         }
 
         // Check ACL access
-        const hasAccess = await hasACLAccess(fastify, user, equipment as any)
+        const hasAccess = await hasACLAccess(fastifyInstance, user, equipment as any)
 
         if (!hasAccess) {
           const fastifyInstance = request.server as FastifyInstance
@@ -143,8 +143,6 @@ export function createEquipmentAuthHook(
       } catch (error) {
         const fastifyInstance = request.server as FastifyInstance
         fastifyInstance.log.error({ error, equipmentId }, 'equipment.authz.check_failed')
-        reply.code(500).send({ error: 'Failed to verify access' })
-        return
         reply.code(500).send({ error: 'Failed to verify access' })
         return
       }

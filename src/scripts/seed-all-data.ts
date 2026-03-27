@@ -5,7 +5,7 @@
  * Usage:
  *   ts-node -r dotenv/config src/scripts/seed-all-data.ts
  *   or
- *   yarn workspace @hospitalrun/server seed:all
+ *   npm run --workspace=@lahim/server seed:all
  */
 
 import * as dotenv from 'dotenv'

@@ -53,7 +53,12 @@ export default (
         return
       }
 
-      const portalData = await portalResponse.json()
+      const portalData = (await portalResponse.json()) as {
+        userId?: string
+        consultantId?: string
+        inviteToken?: string
+        inviteExpiresAt?: string
+      }
 
       // Store consultant relationship in LaHIM core if needed
       // This is a placeholder - implement based on your LaHIM core schema

@@ -1,11 +1,11 @@
 import { join } from 'path'
 import AutoLoad from '@fastify/autoload'
-import { FastifyInstance, FastifyError } from 'fastify'
+import { FastifyInstance } from 'fastify'
 import helmet from '@fastify/helmet'
 import qs from 'qs'
 import cors from '@fastify/cors'
 
-function LaHIM(fastify: FastifyInstance, opts: any, next: (err?: FastifyError) => void) {
+async function LaHIM(fastify: FastifyInstance, opts: any) {
   // CORS configuration - must specify origin when credentials are used
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3001'
   const allowedOrigins = [
@@ -75,8 +75,6 @@ function LaHIM(fastify: FastifyInstance, opts: any, next: (err?: FastifyError) =
     options: { ...opts },
     ignorePattern: /^(dual-write-service|event-handlers|lab-orders-modern|drug-interactions-external)\.(js|ts)$/,
   } as any)
-
-  next()
 }
 
 LaHIM.options = {

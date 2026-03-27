@@ -96,60 +96,6 @@ async function createInAppNotification(
 }
 
 /**
- * Send email notification
- */
-async function sendEmailNotification(
-  fastify: FastifyInstance,
-  email: string,
-  notification: MaintenanceNotification
-): Promise<void> {
-  // Use existing email delivery service if available
-  try {
-    const { sendEmail } = require('../delivery/email-delivery')
-
-    const subject = `Maintenance ${notification.status === 'overdue' ? 'Overdue' : 'Due Soon'}: ${notification.equipmentName}`
-    const text = `
-Equipment Maintenance Alert
-
-Equipment: ${notification.equipmentName}
-Status: ${notification.status === 'overdue' ? 'OVERDUE' : 'Due Soon'}
-Next Due Date: ${new Date(notification.nextDue).toLocaleDateString()}
-
-Please schedule maintenance for this equipment.
-
-View Equipment: ${process.env.FRONTEND_URL || 'http://localhost:3001'}/equipment/${notification.equipmentId}
-    `.trim()
-
-    const html = `
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2>Equipment Maintenance Alert</h2>
-          <p><strong>Equipment:</strong> ${notification.equipmentName}</p>
-          <p><strong>Status:</strong> <span style="color: ${notification.status === 'overdue' ? '#d32f2f' : '#f57c00'}; font-weight: bold;">${notification.status === 'overdue' ? 'OVERDUE' : 'Due Soon'}</span></p>
-          <p><strong>Next Due Date:</strong> ${new Date(notification.nextDue).toLocaleDateString()}</p>
-          <p>Please schedule maintenance for this equipment.</p>
-          <p><a href="${process.env.FRONTEND_URL || 'http://localhost:3001'}/equipment/${notification.equipmentId}" style="background-color: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">View Equipment</a></p>
-          <hr>
-          <p style="font-size: 12px; color: #666;">This is an automated message from LaHIM Equipment Maintenance System.</p>
-        </body>
-      </html>
-    `
-
-    await sendEmail({
-      to: email,
-      subject,
-      text,
-      html,
-    })
-
-    fastify.log.debug({ email, equipmentId: notification.equipmentId }, 'maintenance.email.sent')
-  } catch (error) {
-    fastify.log.warn({ error, email, equipmentId: notification.equipmentId }, 'maintenance.email.send_failed')
-    throw error
-  }
-}
-
-/**
  * Process due/overdue maintenance notifications
  */
 async function processMaintenanceNotifications(fastify: FastifyInstance, windowDays: number = 7): Promise<JobMetrics> {
