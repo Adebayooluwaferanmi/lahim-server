@@ -59,7 +59,7 @@ const couchDBPlugin: FastifyPluginAsync<Configuration> = async (fastify, options
 
 export default fp(couchDBPlugin, {
   name: 'couchdb',
-  fastify: '4.x',
+  fastify: '5.x',
 })
 
 declare module 'fastify' {

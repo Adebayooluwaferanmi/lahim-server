@@ -2,6 +2,7 @@ import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { FastifyError } from 'fastify'
 import { checkDatabaseHealth } from '../lib/db-utils'
+import { getStorageRuntime } from '../lib/storage/runtime'
 
 export default (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
@@ -28,6 +29,23 @@ export default (
           postgres: dbHealth.postgres ? 'connected' : 'disconnected',
           redis: dbHealth.redis ? 'connected' : 'disconnected',
           couchdb: dbHealth.couchdb ? 'connected' : 'disconnected',
+        },
+        databaseDetails: {
+          postgres: {
+            enabled: fastify.databaseState.postgres.enabled,
+            lastError: fastify.databaseState.postgres.lastError,
+          },
+          redis: {
+            enabled: fastify.databaseState.redis.enabled,
+            lastError: fastify.databaseState.redis.lastError,
+          },
+        },
+        architecture: {
+          storage: getStorageRuntime({
+            postgresAvailable: dbHealth.postgres,
+            redisAvailable: dbHealth.redis,
+            couchdbAvailable: dbHealth.couchdb,
+          }),
         },
         uptime: process.uptime(),
       }
