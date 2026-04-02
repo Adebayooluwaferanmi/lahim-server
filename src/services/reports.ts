@@ -28,6 +28,23 @@ interface Report {
   [key: string]: any // Allow additional properties from CouchDB
 }
 
+const toNumber = (value: unknown): number => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+const isWithinDateRange = (value: unknown, startDate?: string, endDate?: string) => {
+  if (!value) return !startDate && !endDate
+
+  const isoValue = String(value)
+  if (startDate && isoValue < startDate) return false
+  if (endDate && isoValue > endDate) return false
+  return true
+}
+
+const sumBy = (docs: any[], selector: (doc: any) => number) =>
+  docs.reduce((sum, doc) => sum + selector(doc), 0)
+
 export default async (
   fastify: FastifyInstance<Server, IncomingMessage, ServerResponse>,
   _: {},
@@ -35,6 +52,11 @@ export default async (
   // Ensure database exists
   if (fastify.couchAvailable && fastify.couch) {
     await ensureCouchDBDatabase(fastify, 'reports')
+    await ensureCouchDBDatabase(fastify, 'invoices')
+    await ensureCouchDBDatabase(fastify, 'payments')
+    await ensureCouchDBDatabase(fastify, 'patient_wallets')
+    await ensureCouchDBDatabase(fastify, 'billing_overrides')
+    await ensureCouchDBDatabase(fastify, 'financial_transactions')
   }
 
   // Only create database reference if CouchDB is available
@@ -749,85 +771,282 @@ export default async (
   // GET /reports/financial - Generate financial reports
   fastify.get('/reports/financial', async (request, reply) => {
     try {
-      const { reportType, startDate, endDate } = request.query as any
+      const { reportType = 'summary', startDate, endDate, patientId } = request.query as any
 
       const invoicesDb = fastify.couch.db.use('invoices')
       const paymentsDb = fastify.couch.db.use('payments')
-      // const chargesDb = fastify.couch.db.use('charges') // Reserved for future use
+      const walletsDb = fastify.couch.db.use('patient_wallets')
+      const overridesDb = fastify.couch.db.use('billing_overrides')
+      const transactionsDb = fastify.couch.db.use('financial_transactions')
+
+      const [invoiceDocs, paymentDocs, walletDocs, overrideDocs, transactionDocs] = await Promise.all([
+        invoicesDb.find({
+          selector: {
+            type: 'invoice',
+            ...(patientId ? { patientId } : {}),
+          },
+          limit: 2000,
+        }),
+        paymentsDb.find({
+          selector: {
+            type: 'payment',
+            ...(patientId ? { patientId } : {}),
+          },
+          limit: 2000,
+        }),
+        walletsDb.find({
+          selector: {
+            type: 'patientWallet',
+            ...(patientId ? { patientId } : {}),
+          },
+          limit: 2000,
+        }),
+        overridesDb.find({
+          selector: {
+            type: 'billingOverride',
+            ...(patientId ? { patientId } : {}),
+          },
+          limit: 2000,
+        }),
+        transactionsDb.find({
+          selector: {
+            type: 'financialTransaction',
+            ...(patientId ? { patientId } : {}),
+          },
+          limit: 2000,
+        }),
+      ])
+
+      const invoices = (invoiceDocs.docs as any[]).filter((invoice) =>
+        isWithinDateRange(invoice.billDate || invoice.createdAt, startDate, endDate),
+      )
+      const payments = (paymentDocs.docs as any[]).filter((payment) =>
+        isWithinDateRange(payment.paymentDate || payment.createdAt, startDate, endDate),
+      )
+      const wallets = (walletDocs.docs as any[]).filter((wallet) =>
+        !startDate && !endDate ? true : isWithinDateRange(wallet.updatedAt || wallet.createdAt, startDate, endDate),
+      )
+      const overrides = (overrideDocs.docs as any[]).filter((override) =>
+        !startDate && !endDate
+          ? true
+          : isWithinDateRange(override.grantedAt || override.createdAt, startDate, endDate),
+      )
+      const transactions = (transactionDocs.docs as any[]).filter((transaction) =>
+        isWithinDateRange(transaction.postedAt || transaction.createdAt, startDate, endDate),
+      )
+
+      const totalBilled = sumBy(invoices, (invoice) => toNumber(invoice.total))
+      const totalCollected = sumBy(payments, (payment) => toNumber(payment.amount))
+      const totalOutstanding = sumBy(invoices, (invoice) => Math.max(toNumber(invoice.balance), 0))
+      const totalWalletBalance = sumBy(wallets, (wallet) => toNumber(wallet.balance))
+      const activeOverrides = overrides.filter(
+        (override) => override.active !== false && override.status !== 'revoked',
+      )
+      const activeOverrideAmount = sumBy(
+        activeOverrides,
+        (override) => toNumber(override.approvedAmount ?? override.limitAmount),
+      )
+
+      const outstandingByPatient = new Map<string, number>()
+      invoices.forEach((invoice) => {
+        const currentPatientId = String(invoice.patientId || '')
+        if (!currentPatientId) return
+
+        outstandingByPatient.set(
+          currentPatientId,
+          (outstandingByPatient.get(currentPatientId) || 0) + Math.max(toNumber(invoice.balance), 0),
+        )
+      })
 
       let reportData: any = {}
 
       switch (reportType) {
-        case 'revenue':
-          const revenueSelector: any = {
-            type: 'invoice',
-          }
-          if (startDate && endDate) {
-            revenueSelector.billDate = { $gte: startDate, $lte: endDate }
-          }
-          const invoicesResult = await invoicesDb.find({
-            selector: revenueSelector,
-            limit: 1000,
-          })
-          const totalRevenue = invoicesResult.docs.reduce((sum: number, inv: any) => {
-            return sum + (inv.totalAmount || 0)
-          }, 0)
+        case 'summary':
           reportData = {
-            totalRevenue,
-            invoiceCount: invoicesResult.docs.length,
-            byDepartment: {},
-            byService: {},
+            summary: {
+              totalBilled,
+              totalCollected,
+              totalOutstanding,
+              totalWalletBalance,
+              activeOverrideAmount,
+              invoiceCount: invoices.length,
+              paymentCount: payments.length,
+              walletCount: wallets.length,
+              activeOverrideCount: activeOverrides.length,
+            },
+            patientBalances: [...outstandingByPatient.entries()]
+              .map(([currentPatientId, balance]) => ({
+                patientId: currentPatientId,
+                outstandingBalance: balance,
+              }))
+              .sort((left, right) => right.outstandingBalance - left.outstandingBalance)
+              .slice(0, 20),
+            recentCollections: payments
+              .map((payment) => ({
+                id: payment._id,
+                patientId: payment.patientId,
+                invoiceId: payment.invoiceId,
+                paymentDate: payment.paymentDate,
+                paymentMethod: payment.paymentMethod,
+                amount: toNumber(payment.amount),
+                referenceNumber: payment.referenceNumber || '-',
+              }))
+              .sort((left, right) => String(right.paymentDate || '').localeCompare(String(left.paymentDate || '')))
+              .slice(0, 20),
           }
           break
 
-        case 'payments':
-          const paymentSelector: any = {
-            type: 'payment',
-          }
-          if (startDate && endDate) {
-            paymentSelector.paymentDate = { $gte: startDate, $lte: endDate }
-          }
-          const paymentsResult = await paymentsDb.find({
-            selector: paymentSelector,
-            limit: 1000,
-          })
-          const totalPayments = paymentsResult.docs.reduce((sum: number, pay: any) => {
-            return sum + (pay.amount || 0)
-          }, 0)
+        case 'wallet-balances':
           reportData = {
-            totalPayments,
-            paymentCount: paymentsResult.docs.length,
-            byMethod: {},
-            byDate: {},
+            summary: {
+              totalWalletBalance,
+              activeWallets: wallets.filter((wallet) => wallet.status === 'active').length,
+              inactiveWallets: wallets.filter((wallet) => wallet.status !== 'active').length,
+              averageWalletBalance: wallets.length > 0 ? totalWalletBalance / wallets.length : 0,
+            },
+            wallets: wallets
+              .map((wallet) => ({
+                id: wallet._id,
+                patientId: wallet.patientId,
+                status: wallet.status,
+                currency: wallet.currency || 'NGN',
+                balance: toNumber(wallet.balance),
+                lastFundedAt: wallet.lastFundedAt || '-',
+                lastSettledAt: wallet.lastSettledAt || '-',
+              }))
+              .sort((left, right) => right.balance - left.balance),
+            recentWalletActivity: transactions
+              .filter((transaction) =>
+                ['walletFunding', 'walletSettlement'].includes(String(transaction.transactionType || '')),
+              )
+              .map((transaction) => ({
+                id: transaction._id,
+                patientId: transaction.patientId,
+                type: transaction.transactionType,
+                direction: transaction.direction,
+                amount: toNumber(transaction.amount),
+                postedAt: transaction.postedAt || transaction.createdAt,
+                referenceNumber: transaction.referenceNumber || '-',
+              }))
+              .sort((left, right) => String(right.postedAt || '').localeCompare(String(left.postedAt || '')))
+              .slice(0, 30),
+          }
+          break
+
+        case 'override-exposure':
+          reportData = {
+            summary: {
+              activeOverrideCount: activeOverrides.length,
+              activeOverrideAmount,
+              patientsWithOverrides: new Set(activeOverrides.map((override) => String(override.patientId || ''))).size,
+            },
+            overrides: activeOverrides
+              .map((override) => ({
+                id: override._id,
+                patientId: override.patientId,
+                privilegeType: override.privilegeType || 'billing_exception',
+                reason: override.reason,
+                grantedBy: override.grantedBy,
+                approvedAmount: toNumber(override.approvedAmount ?? override.limitAmount),
+                outstandingBalance: outstandingByPatient.get(String(override.patientId || '')) || 0,
+                expiresAt: override.expiresAt || '-',
+                grantedAt: override.grantedAt || override.createdAt,
+                status: override.status,
+              }))
+              .sort((left, right) => right.outstandingBalance - left.outstandingBalance),
+          }
+          break
+
+        case 'collections':
+        case 'payments':
+          {
+            const byMethod = payments.reduce((acc, payment) => {
+              const method = String(payment.paymentMethod || 'unknown')
+              acc[method] = (acc[method] || 0) + toNumber(payment.amount)
+              return acc
+            }, {} as Record<string, number>)
+
+            reportData = {
+              summary: {
+                totalCollections: totalCollected,
+                paymentCount: payments.length,
+                averageCollection: payments.length > 0 ? totalCollected / payments.length : 0,
+              },
+              byMethod: Object.entries(byMethod).map(([method, amount]) => ({
+                method,
+                amount,
+              })),
+              payments: payments
+                .map((payment) => ({
+                  id: payment._id,
+                  patientId: payment.patientId,
+                  invoiceId: payment.invoiceId,
+                  amount: toNumber(payment.amount),
+                  paymentDate: payment.paymentDate || payment.createdAt,
+                  paymentMethod: payment.paymentMethod,
+                  referenceNumber: payment.referenceNumber || '-',
+                  receivedBy: payment.receivedBy || '-',
+                }))
+                .sort((left, right) =>
+                  String(right.paymentDate || '').localeCompare(String(left.paymentDate || '')),
+                ),
+            }
+          }
+          break
+
+        case 'revenue':
+          reportData = {
+            summary: {
+              totalRevenue: totalBilled,
+              invoiceCount: invoices.length,
+              averageInvoiceValue: invoices.length > 0 ? totalBilled / invoices.length : 0,
+            },
+            invoices: invoices
+              .map((invoice) => ({
+                id: invoice._id,
+                patientId: invoice.patientId,
+                invoiceNumber: invoice.invoiceNumber || '-',
+                billDate: invoice.billDate,
+                status: invoice.status,
+                total: toNumber(invoice.total),
+                paidTotal: toNumber(invoice.paidTotal),
+                balance: Math.max(toNumber(invoice.balance), 0),
+              }))
+              .sort((left, right) => String(right.billDate || '').localeCompare(String(left.billDate || ''))),
           }
           break
 
         case 'outstanding-balances':
-          const outstandingInvoices = await invoicesDb.find({
-            selector: {
-              type: 'invoice',
-              status: { $ne: 'Paid' },
-            },
-            limit: 1000,
-          })
-          const totalOutstanding = outstandingInvoices.docs.reduce((sum: number, inv: any) => {
-            return sum + ((inv.totalAmount || 0) - (inv.paidAmount || 0))
-          }, 0)
           reportData = {
-            totalOutstanding,
-            invoiceCount: outstandingInvoices.docs.length,
-            byAge: {},
-            byPatient: {},
+            summary: {
+              totalOutstanding,
+              invoiceCount: invoices.filter((invoice) => Math.max(toNumber(invoice.balance), 0) > 0).length,
+              patientsWithOutstanding: outstandingByPatient.size,
+            },
+            invoices: invoices
+              .filter((invoice) => Math.max(toNumber(invoice.balance), 0) > 0)
+              .map((invoice) => ({
+                id: invoice._id,
+                patientId: invoice.patientId,
+                invoiceNumber: invoice.invoiceNumber || '-',
+                billDate: invoice.billDate,
+                status: invoice.status,
+                total: toNumber(invoice.total),
+                paidTotal: toNumber(invoice.paidTotal),
+                balance: Math.max(toNumber(invoice.balance), 0),
+              }))
+              .sort((left, right) => right.balance - left.balance),
           }
           break
 
         case 'profitability':
-          // Calculate revenue vs expenses
           reportData = {
-            revenue: {},
-            expenses: {},
-            profit: {},
-            margin: {},
+            summary: {
+              revenue: totalBilled,
+              collections: totalCollected,
+              estimatedMargin: totalBilled - totalCollected,
+            },
+            note: 'Expense modeling is not yet available in this phase. Profitability is presented as billed versus collected.',
           }
           break
 
@@ -839,6 +1058,11 @@ export default async (
       reply.send({
         reportType,
         generatedOn: new Date().toISOString(),
+        filters: {
+          startDate: startDate || null,
+          endDate: endDate || null,
+          patientId: patientId || null,
+        },
         data: reportData,
       })
     } catch (error: unknown) {

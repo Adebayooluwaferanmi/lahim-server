@@ -1,6 +1,7 @@
 import { Server, IncomingMessage, ServerResponse } from 'http'
 import { FastifyInstance } from 'fastify'
 import { ensureCouchDBDatabase, createCouchDBIndexes } from '../lib/db-utils'
+import { emitRealtimeEvent } from '../plugins/socketio'
 
 const toNumber = (value: unknown): number => {
   const parsed = Number(value)
@@ -9,7 +10,7 @@ const toNumber = (value: unknown): number => {
 
 const isoNow = () => new Date().toISOString()
 
-const sortByDateDesc = (docs: any[], field: string) =>
+  const sortByDateDesc = (docs: any[], field: string) =>
   [...docs].sort((left, right) => String(right[field] || '').localeCompare(String(left[field] || '')))
 
 const isOverrideActive = (override: any, currentTimestamp: string) => {
@@ -168,15 +169,34 @@ export default async (
   }
 
   const emitFinancialUpdate = (patientId: string, event: string, payload: Record<string, unknown>) => {
-    const io = (fastify as any).io
-    if (!io) return
+    if (!(fastify as any).io) return
 
-    io.emit('patient-finance:update', {
+    const eventPayload = {
       event,
       patientId,
       timestamp: isoNow(),
       ...payload,
+    }
+
+    emitRealtimeEvent(fastify, `patient-finance:${patientId}`, {
+      type: 'update',
+      id: patientId,
+      data: eventPayload,
     })
+
+    emitRealtimeEvent(fastify, 'financial-summary', {
+      type: 'update',
+      id: patientId,
+      data: eventPayload,
+    })
+
+    if (event.startsWith('override.')) {
+      emitRealtimeEvent(fastify, 'billing-overrides', {
+        type: 'update',
+        id: String(payload.overrideId || patientId),
+        data: eventPayload,
+      })
+    }
   }
 
   const ensureAccountAndWallet = async (payload: any) => {
